@@ -65,9 +65,12 @@ cwd. The fingerprint is stamped at add-time; you never type it.
 
 ### Fingerprint expectations
 The CLI stamps fingerprints. For **remote artifacts** (`external`/remote `data`), it runs
-`ssh <remote_host> md5sum <path>` in-session — so the host must be reachable at author
-time, or it honestly records `fingerprint: unknown` (a false `fresh` is the enemy). Make
-sure the remote artifact actually exists before grounding against it.
+`ssh <remote_host> md5sum <ref>` in-session, where `<remote_host>` is `remote_host` from
+`cairn/config.json` and `<ref>` is the bare remote path you grounded against — so set
+`remote_host` in `cairn/config.json`, and the host must be reachable at author time, or it
+honestly records `fingerprint: unknown` (a false `fresh` is the enemy). (If `remote_host`
+is unset you can instead pass a `host:path` ref directly.) Make sure the remote artifact
+actually exists before grounding against it.
 
 ## 3. REFRESH — after any rerun
 

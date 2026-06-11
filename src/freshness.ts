@@ -34,9 +34,9 @@ import type {
 type EdgeState = FreshnessState;
 
 /** Re-fingerprint one edge and classify it vs its stamped value. */
-export function edgeState(hostRoot: string, edge: GroundingEdge): EdgeState {
+export function edgeState(hostRoot: string, edge: GroundingEdge, remoteHost?: string): EdgeState {
   if (edge.fingerprint === UNKNOWN) return "unknown";
-  const current = fingerprintByMethod(hostRoot, edge.method, edge.ref, edge.location);
+  const current = fingerprintByMethod(hostRoot, edge.method, edge.ref, edge.location, remoteHost);
   if (current === UNKNOWN) return "unknown";
   return current === edge.fingerprint ? "fresh" : "stale";
 }
@@ -69,6 +69,7 @@ export function computeFreshness(
   claims: ClaimFile[],
   hostRoot: string,
   as_of: string,
+  remoteHost?: string,
 ): Map<string, Freshness> {
   const byId = new Map<string, ClaimFrontmatter>();
   for (const c of claims) byId.set(c.frontmatter.id, c.frontmatter);
@@ -78,7 +79,7 @@ export function computeFreshness(
   const tiers = new Map<string, Tier>();
   for (const c of claims) {
     const fm = c.frontmatter;
-    const states = fm.grounding.map((e) => edgeState(hostRoot, e));
+    const states = fm.grounding.map((e) => edgeState(hostRoot, e, remoteHost));
     own.set(fm.id, selfState(states));
     tiers.set(fm.id, bestTier(fm.grounding));
   }

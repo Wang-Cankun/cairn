@@ -16,6 +16,7 @@ import {
   isoNow,
   readAllClaims,
   readClaim,
+  readConfig,
   requireStore,
   resolveStoreForWrite,
   writeClaim,
@@ -82,7 +83,7 @@ function fmtFreshness(f: { state: string; tier: string }): string {
 function cmdHead(paths: StorePaths): void {
   const claims = readAllClaims(paths);
   const now = isoNow();
-  const freshness = computeFreshness(claims, paths.hostRoot, now);
+  const freshness = computeFreshness(claims, paths.hostRoot, now, readConfig(paths).remote_host);
   const canonical = canonicalFrontmatter(claims);
 
   console.log(`canonical (${canonical.length}):`);
@@ -114,9 +115,10 @@ function cmdAddClaim(paths: StorePaths, parsed: Parsed): void {
   const text = parsed.flags.text?.[0];
   if (!text) fail("add-claim requires --text", 2);
   const id = allocateClaimId(paths);
+  const remoteHost = readConfig(paths).remote_host;
   const grounding = (parsed.flags.evidence ?? []).map((spec) => {
     const ev = parseEvidence(spec);
-    return stampEdge(paths.hostRoot, ev.kind, ev.ref);
+    return stampEdge(paths.hostRoot, ev.kind, ev.ref, { remoteHost });
   });
   const depends_on = parsed.flags["depends-on"] ?? [];
   const fm: ClaimFrontmatter = {
@@ -140,9 +142,10 @@ function cmdGround(paths: StorePaths, parsed: Parsed): void {
   if (!claim) fail(`claim ${id} not found`, 2);
   const specs = parsed.flags.evidence ?? [];
   if (specs.length === 0) fail("ground requires at least one --evidence kind:ref", 2);
+  const remoteHost = readConfig(paths).remote_host;
   const newEdges = specs.map((spec) => {
     const ev = parseEvidence(spec);
-    return stampEdge(paths.hostRoot, ev.kind, ev.ref);
+    return stampEdge(paths.hostRoot, ev.kind, ev.ref, { remoteHost });
   });
   const fm: ClaimFrontmatter = {
     ...claim!.frontmatter,
@@ -155,7 +158,7 @@ function cmdGround(paths: StorePaths, parsed: Parsed): void {
 function cmdRefresh(paths: StorePaths): void {
   const claims = readAllClaims(paths);
   const now = isoNow();
-  const freshness = computeFreshness(claims, paths.hostRoot, now);
+  const freshness = computeFreshness(claims, paths.hostRoot, now, readConfig(paths).remote_host);
   const canonical = canonicalFrontmatter(claims);
   console.log(`refreshed freshness for ${canonical.length} canonical claim(s) @ ${now}`);
   for (const fm of canonical) {

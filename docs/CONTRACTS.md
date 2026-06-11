@@ -257,9 +257,13 @@ Fingerprint the edge **immediately** at add-time, choosing `method` from `kind`:
   (Weak fallback `size-mtime` only if hashing is impractical.)
 - `kind:target` → `method: pipeline-meta`; read the targets meta store
   (`_targets/meta/meta`, the `data` content-hash column for `ref`); `location` = the meta store path.
-- `kind:external` → remote artifact: `method: remote-md5` via `ssh <remote_host> md5sum`; if the
-  host is unreachable, store `fingerprint: "unknown"` honestly.
-- `kind:data` → treat as a file (`sha256`) if locally reachable, else `remote-md5`/`unknown`.
+- `kind:external` → remote artifact: `method: remote-md5` via `ssh <remote_host> md5sum <ref>`,
+  where `<remote_host>` is `config.remote_host` and the bare `ref` is the remote path. If
+  `remote_host` is not configured, a `host:path` ref is also accepted (host split on the first
+  `:`). With neither a configured host nor a `host:path` ref, or if the host is unreachable, store
+  `fingerprint: "unknown"` honestly (a false `fresh` is the enemy).
+- `kind:data` → treat as a file (`sha256`) if locally reachable, else `remote-md5`/`unknown`
+  (remote-md5 uses the same `remote_host` resolution as `kind:external`).
 
 Method→tier mapping (TS `METHOD_TIER`): pipeline-meta→`pipeline`, sha256→`content`,
 size-mtime→`weak`, remote-md5→`remote`. A claim's badge tier = best tier among its grounding

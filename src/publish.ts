@@ -151,8 +151,11 @@ export function publish(
   if (promoted.length > 0) claims = readAllClaims(paths);
 
   // 3. Published head: canonical only, freshness frozen at publish (as_of = published_at).
+  // Load config once: remote_host drives remote-md5 re-fingerprinting (CONTRACTS §8), reused below
+  // for the warn-only reconcile.
+  const config = readConfig(paths);
   const canonical = canonicalFrontmatter(claims);
-  const freshness = computeFreshness(claims, paths.hostRoot, published_at);
+  const freshness = computeFreshness(claims, paths.hostRoot, published_at, config.remote_host);
   const publishedClaims: PublishedClaim[] = canonical.map((fm) => {
     const fr = freshness.get(fm.id);
     if (!fr) throw new PublishError(`internal: missing freshness for ${fm.id}`);
@@ -204,7 +207,7 @@ export function publish(
   cpSync(join(snapshotDir, "data", "head.json"), paths.headJsonPath);
 
   // 7. Warn-only reconcile (never blocks).
-  const report = reconcile(paths.hostRoot, readConfig(paths), claims);
+  const report = reconcile(paths.hostRoot, config, claims);
 
   return { snapshotId, previousId, promoted, head, diff, reconcile: report, reused };
 }
