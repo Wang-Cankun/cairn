@@ -7,6 +7,65 @@ A read-only **canonical projection of a claim graph** for sharing analysis resul
 > grounded record that two later readers — a collaborator, and your next AI session —
 > can rely on without re-deriving the whole history.
 
+## Quickstart
+
+Cairn v1 is implemented: a `bun` + TypeScript CLI (the sole writer), a derived in-memory SQLite
+index, a portable React snapshot site, and the agent skill. Requires **bun ≥ 1.3** (never
+npm/npx/node).
+
+```sh
+bun install                 # root deps (yaml + bun-types)
+bun run build:site          # build the static viewer ONCE -> site/dist (publish copies this in)
+```
+
+The CLI walks up from cwd to find a `cairn/` store (auto-created on first write — there is no
+`init`). All evidence paths are **host-root-relative** (the dir containing `cairn/`). Run it with
+`bun run src/cli.ts <verb>` (or `bun run cairn <verb>`).
+
+### The 8 verbs
+
+| Verb | What it does |
+|---|---|
+| `cairn head` | Print the local orient view — canonical claims (with **live** freshness + verification) + pending drafts — and (re)write `cairn/head.json`. The session-start orient step. |
+| `cairn add-claim --text "…" [--evidence kind:ref …] [--depends-on id …]` | Write a new **draft** claim. Each `--evidence` is fingerprinted now (`file`→sha256, `target`→pipeline-meta, `external`→remote-md5). Flags repeatable. |
+| `cairn ground <id> --evidence kind:ref` | Attach + stamp a grounding edge onto an existing draft. |
+| `cairn refresh` | Recompute freshness for canonical claims by re-fingerprinting reachable artifacts (unreachable → `unknown`); surface newly-stale claims. Run after a rerun / `tar_make()`. |
+| `cairn validate` | Rebuild the index, run the reach-ground (iron-rule) gate; nonzero exit naming any claim that can't reach ground (incl. cycles). |
+| `cairn publish` | Gate → promote grounded drafts → freeze an immutable `snapshots/<id>/` (prebuilt site + `data/`) → refresh the stable `published/latest/` share link → warn-only reconcile. |
+| `cairn drafts` | List pending drafts; ungrounded ones flagged. |
+| `cairn status` | Store path, #canonical / #drafts / #ungrounded, last snapshot id. |
+
+### Publish & share (decisions A, B, F)
+
+`publish` writes an immutable, content-addressed `cairn/snapshots/<id>/` (the prebuilt static
+viewer + `data/head.json` + `data/diff.json`, **canonical claims only — no drafts**) and refreshes
+`cairn/published/latest/`, a full COPY of the newest snapshot. Share the `latest/` path **once**;
+it always shows the newest publish. Every snapshot opens from a plain `file://` path or any static
+host, including a nested sub-path (all asset/data references are relative).
+
+### The agent skill
+
+The skill (`skill/cairn/SKILL.md`) is the agent's 4-touchpoint protocol (orient → author →
+refresh → publish). Install it for Claude Code by symlinking:
+
+```sh
+ln -s "$(pwd)/skill/cairn" ~/.claude/skills/cairn
+```
+
+### Run the demo / tests
+
+```sh
+bun test                    # unit + CLI integration tests
+bun run build:site          # required before acceptance (publish copies site/dist)
+bun run acceptance          # full v1 loop against a temp copy of fixtures/demo-project
+```
+
+`bun run acceptance` exercises the whole loop end to end: author 4 drafts (target-grounded,
+file-grounded, dependency+file-grounded, plus one zero-edge leftover), validate, publish (promotes
+3, reports the leftover), assert canonical-only `head.json`, mutate evidence → refresh → stale
+cascade, re-publish with a real diff + immutable prior snapshot + `latest/` mirroring the new one,
+and a negative reach-ground gate test.
+
 ## What it is (one paragraph)
 
 Instead of zipping results and mailing them, you publish them as **claims**. A claim is a
@@ -37,7 +96,7 @@ generic document/notes tool.
 
 ## How to use this repo
 
-This repo is the design brief, not the code yet. Read order (later docs win where they differ):
+Below is the design brief behind the implementation. Read order (later docs win where they differ):
 
 1. `CONTEXT.md` — glossary + the canonical, current decisions. **Authoritative.**
 2. `docs/adr/` — the resolved design forks (0001 draft authoring, 0002 evidence-fingerprint

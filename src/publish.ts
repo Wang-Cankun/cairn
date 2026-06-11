@@ -15,7 +15,8 @@
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { computeFreshness } from "./freshness.ts";
 import { runGate, type GateResult } from "./gate.ts";
 import { reconcile, type ReconcileReport } from "./reconcile.ts";
@@ -46,43 +47,65 @@ export interface PublishResult {
   reused: boolean; // true if snapshot id already existed (no-op re-publish)
 }
 
-/** Read the previous published head (cairn/head.json), or null on first publish. */
+/**
+ * Read the previous published head for lineage/diff. Source = `published/latest/data/head.json`,
+ * which is written ONLY by publish — NOT the mutable convenience `cairn/head.json`, which `refresh`
+ * and `head` clobber (they set snapshot.current="") and would otherwise erase publish lineage.
+ * Falls back to `cairn/head.json` only if it carries a real (non-empty) snapshot id, for stores
+ * predating the latest/ dir. Returns null on first publish.
+ */
 function readPreviousHead(paths: StorePaths): PublishedHead | null {
-  if (!existsSync(paths.headJsonPath)) return null;
-  try {
-    return JSON.parse(readFileSync(paths.headJsonPath, "utf8")) as PublishedHead;
-  } catch {
-    return null;
+  const latestHead = join(paths.publishedLatestDir, "data", "head.json");
+  for (const candidate of [latestHead, paths.headJsonPath]) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const h = JSON.parse(readFileSync(candidate, "utf8")) as PublishedHead;
+      if (h?.snapshot?.current) return h;
+    } catch {
+      /* try next */
+    }
   }
+  return null;
 }
 
 /**
- * HOOK POINT (decision F): copy the prebuilt static site bundle into the snapshot dir. v1 data
- * pass leaves this for the integration pass to wire to the real bundle source. If a prebuilt
- * bundle exists at `<store>/../site/dist` or env CAIRN_SITE_DIST, copy it; otherwise write a
- * minimal placeholder index.html that loads ./data/head.json (so the snapshot is self-contained
- * and openable even before the React bundle is wired).
+ * Resolve the prebuilt site bundle dir (decision F). Precedence: explicit arg, then
+ * CAIRN_SITE_DIST env, then the repo's own `site/dist` (resolved relative to THIS source file, so
+ * it works regardless of cwd / where the host store lives). Returns null if none resolves to an
+ * existing dir.
  */
-export function copySiteBundle(snapshotDir: string, siteDist?: string): "bundle" | "placeholder" {
-  const src = siteDist ?? process.env.CAIRN_SITE_DIST;
-  if (src && existsSync(src)) {
-    cpSync(src, snapshotDir, { recursive: true });
-    return "bundle";
+export function resolveSiteDist(siteDist?: string): string | null {
+  const candidates = [siteDist, process.env.CAIRN_SITE_DIST].filter(Boolean) as string[];
+  // Repo-relative default: src/publish.ts -> ../site/dist
+  const here = dirname(fileURLToPath(import.meta.url));
+  candidates.push(join(here, "..", "site", "dist"));
+  for (const c of candidates) {
+    if (existsSync(join(c, "index.html"))) return c;
   }
-  // Self-contained placeholder so the snapshot is openable; integration pass replaces this.
-  const placeholder = `<!doctype html>
-<meta charset="utf-8">
-<title>Cairn published head</title>
-<body>
-<h1>Cairn — published head</h1>
-<p>Static site bundle not yet wired (decision F hook point). Machine-readable data:</p>
-<ul>
-  <li><a href="./data/head.json">data/head.json</a></li>
-  <li><a href="./data/diff.json">data/diff.json</a></li>
-</ul>
-</body>`;
-  writeFileSync(join(snapshotDir, "index.html"), placeholder, "utf8");
-  return "placeholder";
+  return null;
+}
+
+/**
+ * Copy the prebuilt static site bundle (decision F) into the snapshot dir. Copies `index.html`,
+ * `assets/` and `fonts/` only — NOT the bundle's `data/` (those are DEV fixtures; the real
+ * `data/head.json` + `data/diff.json` are written separately by publish). Caller passes a resolved
+ * dist dir (see resolveSiteDist); throws PublishError if it is missing so the operator is told to
+ * build the site first.
+ */
+export function copySiteBundle(snapshotDir: string, dist: string | null): void {
+  if (!dist) {
+    throw new PublishError(
+      "prebuilt site bundle not found (site/dist/index.html missing). Run `bun run build:site` first.",
+    );
+  }
+  // Copy everything except data/ (dev fixtures overwritten by the real data written separately).
+  cpSync(dist, snapshotDir, {
+    recursive: true,
+    filter: (src) => {
+      const rel = src.slice(dist.length).replace(/^[/\\]/, "");
+      return rel !== "data" && !rel.startsWith("data/") && !rel.startsWith("data\\");
+    },
+  });
 }
 
 /**
@@ -95,6 +118,15 @@ export function publish(
 ): PublishResult {
   const now = opts.now ?? new Date();
   const published_at = isoNow(now);
+
+  // Resolve the prebuilt site bundle up front so we fail BEFORE mutating any files (promoting
+  // drafts, writing snapshots) if the site has not been built (decision F).
+  const dist = resolveSiteDist(opts.siteDist);
+  if (!dist) {
+    throw new PublishError(
+      "prebuilt site bundle not found (site/dist/index.html missing). Run `bun run build:site` first.",
+    );
+  }
 
   let claims = readAllClaims(paths);
 
@@ -129,11 +161,13 @@ export function publish(
 
   // 4. Snapshot id (excludes timestamps).
   const snapshotId = computeSnapshotId(canonical);
-  // A head.json written by `head`/`refresh` carries snapshot.current === "" (no snapshot). Treat
-  // that as "no previous snapshot" so the convenience head never pollutes publish lineage/diff.
-  const prevRaw = readPreviousHead(paths);
-  const previousHead = prevRaw && prevRaw.snapshot.current ? prevRaw : null;
-  const previousId = previousHead ? previousHead.snapshot.current : null;
+  // Previous lineage comes from published/latest/ (durable; refresh/head can't clobber it).
+  const previousHead = readPreviousHead(paths);
+  // Re-publishing the SAME content head (same id) is a no-op for lineage/diff: don't diff a head
+  // against itself. Treat a previous head whose id equals this id as "no previous" so `against`
+  // points at the genuinely prior DISTINCT snapshot (or null on the very first publish).
+  const effectivePrev = previousHead && previousHead.snapshot.current !== snapshotId ? previousHead : null;
+  const previousId = effectivePrev ? effectivePrev.snapshot.current : null;
 
   const head: PublishedHead = {
     schema: "cairn.head/1",
@@ -141,26 +175,33 @@ export function publish(
     published_at,
     claims: publishedClaims,
   };
-  const diff = computeDiff(publishedClaims, previousHead);
+  const diff = computeDiff(publishedClaims, effectivePrev);
 
   // 5. Write the immutable snapshot (never mutate an existing one).
   const snapshotDir = join(paths.snapshotsDir, snapshotId);
   const reused = existsSync(snapshotDir);
   if (!reused) {
+    // Copy the prebuilt static bundle FIRST (index.html + assets/ + fonts/, NOT its dev data/),
+    // then write the real data/ on top so the snapshot is self-contained (decision F).
+    mkdirSync(snapshotDir, { recursive: true });
+    copySiteBundle(snapshotDir, dist);
     const dataDir = join(snapshotDir, "data");
     mkdirSync(dataDir, { recursive: true });
     writeFileSync(join(dataDir, "head.json"), JSON.stringify(head, null, 2) + "\n", "utf8");
     writeFileSync(join(dataDir, "diff.json"), JSON.stringify(diff, null, 2) + "\n", "utf8");
-    copySiteBundle(snapshotDir, opts.siteDist); // decision F hook point
   }
 
   // 6. Mirror newest snapshot to published/latest/ (COPY, decision B) + cairn/head.json.
+  // latest/ and cairn/head.json mirror the IMMUTABLE snapshot exactly. For a reused id (republish
+  // of identical content), that snapshot keeps its ORIGINAL frozen-at-publish freshness (decisions
+  // C+E: same content head == same immutable snapshot), so latest/ and head.json stay byte-aligned
+  // with the snapshot rather than carrying a divergent freshly-frozen copy.
   if (existsSync(paths.publishedLatestDir)) {
     rmSync(paths.publishedLatestDir, { recursive: true, force: true });
   }
   mkdirSync(paths.publishedLatestDir, { recursive: true });
   cpSync(snapshotDir, paths.publishedLatestDir, { recursive: true });
-  writeFileSync(paths.headJsonPath, JSON.stringify(head, null, 2) + "\n", "utf8");
+  cpSync(join(snapshotDir, "data", "head.json"), paths.headJsonPath);
 
   // 7. Warn-only reconcile (never blocks).
   const report = reconcile(paths.hostRoot, readConfig(paths), claims);

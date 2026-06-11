@@ -1,0 +1,5 @@
+name type data bytes format
+raw_input object 1a2b3c4d5e6f7a8b 2048 rds
+scores_step_07 object 90e13daf5941a99d 4096 rds
+model_fit object c0ffee1234abcd56 8192 rds
+report_table object deadbeef99887766 1024 rds

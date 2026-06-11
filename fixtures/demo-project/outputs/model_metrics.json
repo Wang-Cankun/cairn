@@ -1,0 +1,8 @@
+{
+  "model": "logistic_regression",
+  "auc": 0.93,
+  "accuracy": 0.88,
+  "n_train": 120,
+  "n_test": 40,
+  "features": ["score", "group"]
+}
