@@ -6,17 +6,17 @@ Status: Accepted (2026-06-10)
 
 Q4 asked whether the source of truth is SQLite itself or plain-text claim files in git with
 SQLite as a derived index. The main argument for SQLite-as-truth was the fear of large files in
-git. A real project (`loy-aml`, a Nature-level revision worked across many sessions) was
+git. A real, large analysis project (multiple gigabytes, worked across many sessions) was
 examined to settle it:
 
-- Total size **29G**; weight is in artifacts: `data/` 11G, `scenic_results/` 3.4G, `osc/` 3.2G,
-  `_targets/` 3.2G, `celloracle_results/` 1.2G, `figures/` 242M, etc.
-- The project's own `.gitignore` already excludes all of it — `data/`, `_targets/`, every
-  `*_results/`, `*.h5ad`, `*.rds`, `*.pdf`, `figures/`, `slides/`, and `results_*/` (commented
-  "Results snapshots (generated, shared via email/Dropbox)"). Tracked big files: **zero**.
-- `.git` is nonetheless **3.1G** — legacy history bloat, not current tracking.
-- `_targets/meta/meta` exists and carries a content-hash `data` column per target.
-- `FINDINGS.md` is **177KB**, hand-grown across sessions — a proto-claim store.
+- The weight is entirely in **artifacts** — large input-data directories, several results
+  directories, a pipeline cache, and figures, each many gigabytes.
+- The project's own `.gitignore` already excludes all of it — the data dirs, the pipeline cache,
+  every results dir, large binary outputs, figures, generated slides, and the per-share results
+  snapshots (commented "shared via email/Dropbox"). Tracked big files: **zero**.
+- `.git` is nonetheless multiple gigabytes — legacy history bloat, not current tracking.
+- A pipeline tool's meta store exists and carries a content-hash column per step.
+- A single findings document is hundreds of KB, hand-grown across sessions — a proto-claim store.
 
 ## Decision
 
@@ -24,7 +24,7 @@ examined to settle it:
 Artifacts are referenced by path + fingerprint, never ingested into the Cairn store.**
 
 - A claim is a small text file (markdown + frontmatter), one per claim. The artifact it grounds
-  on (an `.rds`, a results `.csv`, a figure) stays exactly where it lives — gitignored, on an
+  on (a results table, a saved model object, a figure) stays exactly where it lives — gitignored, on an
   external volume, or on a remote host. Cairn stores the *reference and fingerprint*, not the
   bytes. Cairn's git footprint stays text-only regardless of project size.
 - The hard floor relocates from DB constraints to **CLI (sole writer) + `validate` gate + git
@@ -43,8 +43,9 @@ Artifacts are referenced by path + fingerprint, never ingested into the Cairn st
   free.
 - Files end to end (truth + portable snapshots) makes the Cloudflare Worker future a delivery
   change, not a rewrite.
-- The freshness fingerprint is tiered against real structure: targets targets read their `data`
-  hash from `_targets/meta/meta` (top tier, free); loose result files are hashed directly
+- The freshness fingerprint is tiered against real structure: pipeline-managed steps read their
+  content hash from the pipeline's meta store (e.g. targets' `_targets/meta/meta`; top tier,
+  free); loose result files are hashed directly
   (mid tier); unreachable remote artifacts read `unknown`.
 - Cost accepted: enforcement is CLI/gate-layer, marginally softer than DB constraints. Mitigated
   by sole-writer CLI, the gate, and git visibility.

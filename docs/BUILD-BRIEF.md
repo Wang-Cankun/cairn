@@ -66,15 +66,15 @@ status: draft               # draft | canonical   (draft may be ungrounded — A
 verification: unverified    # unverified | verified | contradicted | unverifiable  (v1: default only)
 grounding:                  # claim -> evidence edges (>=1 required to leave draft)
   - kind: target            # target | file | data | external
-    ref: gene_pair_results
+    ref: results_step_07
     fingerprint: 90e13daf5941a99d
-    method: targets-meta    # targets-meta | sha256 | size-mtime | remote-md5
-    location: _targets/meta/meta
+    method: pipeline-meta   # pipeline-meta | sha256 | size-mtime | remote-md5
+    location: <pipeline-meta-store>
   - kind: file
-    ref: scenic_results/auc.csv
+    ref: outputs/step07_scores.csv
     fingerprint: "sha256:…"
     method: sha256
-    location: scenic_results/auc.csv
+    location: outputs/step07_scores.csv
 depends_on:                 # claim -> claim edges; do NOT count as grounding
   - claim-20260609-014
 created_at: 2026-06-10T20:00:00-04:00
@@ -89,7 +89,7 @@ Optional freeform notes / caveats (qualifier, rebuttal). Not parsed in v1.
   drafts; also write `head.json`. This is the orient step.
 - `cairn add-claim --text "…" [--evidence kind:ref] [--depends-on id]` — write a **draft** claim
   file. Edges optional at creation (soft, ADR-0001). When an edge is given, **stamp its
-  fingerprint now** (file → hash the file; target → read `_targets/meta/meta`).
+  fingerprint now** (file → hash the file; target → read the pipeline tool's meta store).
 - `cairn ground <id> --evidence kind:ref` — attach/stamp an edge to an existing draft.
 - `cairn refresh` — recompute freshness for canonical claims (re-fingerprint reachable
   artifacts; unreachable → `unknown`). Run after a rerun / `tar_make()`.
@@ -125,8 +125,9 @@ they surface here). This is the schema saying *no* — not the agent choosing ca
 ### Rule 2 — freshness from the evidence fingerprint (computed, tiered, honest `unknown`)
 
 Per grounding edge, re-fingerprint by `method`:
-- `targets-meta` → look up `ref` in `_targets/meta/meta`, read the `data` column, compare to the
-  stamped fingerprint. **Top tier** (rigorous, free).
+- `pipeline-meta` → look up `ref` in the pipeline tool's meta store (e.g. targets'
+  `_targets/meta/meta`), read its content-hash column, compare to the stamped fingerprint.
+  **Top tier** (rigorous, free).
 - `sha256` / `size-mtime` → re-hash the file at `location` if reachable. **Mid tier.**
 - `remote-md5` → re-hash on the remote if the host is reachable; else `unknown`.
 
@@ -177,8 +178,9 @@ Use ONE real project. Author a few claims (even 3), each with a grounding edge, 
    alone.
 3. **Honest-badge gut check.** Look at an `unverified` or `unknown` badge on your own claim. If
    you feel the urge to make it look settled, that urge marks where the schema must tighten later.
-4. **Large-project sanity.** Point it at a heavy project (e.g. a 29G analysis dir). Confirm
-   Cairn's store stays text-only — claims reference artifacts, never ingest them.
+4. **Large-project sanity.** Point it at a heavy project (a multi-gigabyte analysis dir full of
+   large artifacts). Confirm Cairn's store stays text-only — claims reference artifacts, never
+   ingest them.
 
 Failure conditions: a claim that can't reach ground gets published → wrong. Freshness stored as
 a column instead of computed → wrong. An ungrounded claim reaching canonical → wrong. Artifacts

@@ -142,9 +142,10 @@ Because it writes back to the graph, it **cannot precede the graph; it composes 
   and diffs. The hard floor is the CLI (sole writer) + `validate` gate + git-diff visibility,
   not DB constraints. See `docs/adr/0003-files-in-git-truth-artifacts-by-reference.md`.
 - **Artifacts are referenced, never ingested.** A claim stores a path + Fingerprint to its
-  evidence artifact (`.rds`, results `.csv`, a figure); the bytes stay where they live —
-  gitignored, on an external volume, or on a remote host. Cairn's git footprint stays text-only
-  regardless of project size (a 29G project yields a few hundred KB of claim text).
+  evidence artifact (a results table, a saved model object, a figure); the bytes stay where they
+  live — gitignored, on an external volume, or on a remote host. Cairn's git footprint stays
+  text-only regardless of project size (a multi-gigabyte project still yields only a few hundred
+  KB of claim text).
 - **The Cairn store is decoupled from the host project's git history** (its own small repo or a
   self-contained text-only subdir), so it never inherits multi-gigabyte history bloat and stays
   portable / Worker-deployable.
