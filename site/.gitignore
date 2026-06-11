@@ -1,0 +1,6 @@
+# built bundle — rebuilt with `bun run build`; publish copies it (decision F)
+dist/
+
+node_modules/
+.DS_Store
+*.log

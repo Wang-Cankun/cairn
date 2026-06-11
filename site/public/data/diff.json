@@ -1,0 +1,41 @@
+{
+  "schema": "cairn.diff/1",
+  "against": "1b7e44aa90cc21f0",
+  "added": [
+    {
+      "id": "claim-20260610-003",
+      "text": "A 42-gene malignant-state signature stratifies overall survival in the external TCGA-GBM cohort (log-rank p = 0.004).",
+      "verification": "unverified",
+      "freshness": { "state": "unknown", "tier": "remote", "as_of": "2026-06-10T20:30:00-04:00" },
+      "grounding": [
+        {
+          "kind": "external",
+          "ref": "tcga_gbm_survival_fit.rds",
+          "fingerprint": "unknown",
+          "method": "remote-md5",
+          "location": "osc:/fs/project/cairn/tcga/tcga_gbm_survival_fit.rds"
+        }
+      ],
+      "depends_on": ["claim-20260610-001"]
+    }
+  ],
+  "removed": ["claim-20260608-009"],
+  "text_changed": [
+    {
+      "id": "claim-20260610-001",
+      "before": "Unsupervised clustering resolves 10 transcriptional states.",
+      "after": "Unsupervised clustering resolves 11 transcriptional states, with cluster 7 marking a proliferating malignant compartment."
+    }
+  ],
+  "freshness_changed": [
+    { "id": "claim-20260610-002", "before": "fresh", "after": "stale" }
+  ],
+  "verification_changed": [],
+  "counts": {
+    "added": 1,
+    "removed": 1,
+    "text_changed": 1,
+    "freshness_changed": 1,
+    "verification_changed": 0
+  }
+}

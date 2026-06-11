@@ -1,0 +1,79 @@
+{
+  "schema": "cairn.head/1",
+  "project": "Glioma scRNA cohort — analysis claims",
+  "snapshot": { "current": "9f3c1a72be0d4e58", "previous": "1b7e44aa90cc21f0" },
+  "published_at": "2026-06-10T20:30:00-04:00",
+  "claims": [
+    {
+      "id": "claim-20260609-014",
+      "text": "Library size and mitochondrial-fraction QC removes 4,182 low-quality cells, leaving 38,901 for analysis.",
+      "verification": "unverified",
+      "freshness": { "state": "fresh", "tier": "pipeline", "as_of": "2026-06-10T20:30:00-04:00" },
+      "grounding": [
+        {
+          "kind": "target",
+          "ref": "qc_filtered_counts",
+          "fingerprint": "90e13daf5941a99d",
+          "method": "pipeline-meta",
+          "location": "_targets/meta/meta"
+        }
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "claim-20260610-001",
+      "text": "Unsupervised clustering resolves 11 transcriptional states, with cluster 7 marking a proliferating malignant compartment.",
+      "verification": "unverified",
+      "freshness": { "state": "fresh", "tier": "pipeline", "as_of": "2026-06-10T20:30:00-04:00" },
+      "grounding": [
+        {
+          "kind": "target",
+          "ref": "leiden_clusters",
+          "fingerprint": "2c5fb18a7e0149aa",
+          "method": "pipeline-meta",
+          "location": "_targets/meta/meta"
+        },
+        {
+          "kind": "file",
+          "ref": "outputs/cluster_markers.csv",
+          "fingerprint": "sha256:ab12cd34ef56ab78cd90ef12ab34cd56ef78ab90cd12ef34ab56cd78ef90ab12",
+          "method": "sha256",
+          "location": "outputs/cluster_markers.csv"
+        }
+      ],
+      "depends_on": ["claim-20260609-014"]
+    },
+    {
+      "id": "claim-20260610-002",
+      "text": "Cluster 7 proliferation signature scores significantly higher in IDH-wildtype than IDH-mutant samples (Wilcoxon p = 3.1e-6).",
+      "verification": "unverified",
+      "freshness": { "state": "stale", "tier": "content", "as_of": "2026-06-10T20:30:00-04:00" },
+      "grounding": [
+        {
+          "kind": "file",
+          "ref": "outputs/prolif_by_idh.csv",
+          "fingerprint": "sha256:7788991122334455667788991122334455667788991122334455667788991122",
+          "method": "sha256",
+          "location": "outputs/prolif_by_idh.csv"
+        }
+      ],
+      "depends_on": ["claim-20260610-001"]
+    },
+    {
+      "id": "claim-20260610-003",
+      "text": "A 42-gene malignant-state signature stratifies overall survival in the external TCGA-GBM cohort (log-rank p = 0.004).",
+      "verification": "unverified",
+      "freshness": { "state": "unknown", "tier": "remote", "as_of": "2026-06-10T20:30:00-04:00" },
+      "grounding": [
+        {
+          "kind": "external",
+          "ref": "tcga_gbm_survival_fit.rds",
+          "fingerprint": "unknown",
+          "method": "remote-md5",
+          "location": "osc:/fs/project/cairn/tcga/tcga_gbm_survival_fit.rds"
+        }
+      ],
+      "depends_on": ["claim-20260610-001"]
+    }
+  ]
+}
