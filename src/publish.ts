@@ -162,8 +162,11 @@ export function publish(
     return toPublishedClaim(fm, fr);
   });
 
-  // 4. Snapshot id (excludes timestamps).
-  const snapshotId = computeSnapshotId(canonical);
+  // 4. Snapshot id (Option X): hashes the published VIEW — canonical claims INCLUDING their
+  // computed freshness {state, tier} — while excluding all wall-clock timestamps. So a
+  // freshness-only change (artifact mutated -> refresh -> publish) yields a NEW id, while a true
+  // no-op republish (same claims, same freshness) is idempotent.
+  const snapshotId = computeSnapshotId(canonical, freshness);
   // Previous lineage comes from published/latest/ (durable; refresh/head can't clobber it).
   const previousHead = readPreviousHead(paths);
   // Re-publishing the SAME content head (same id) is a no-op for lineage/diff: don't diff a head
@@ -180,17 +183,26 @@ export function publish(
   };
   const diff = computeDiff(publishedClaims, effectivePrev);
 
-  // 5. Write the immutable snapshot (never mutate an existing one).
+  // 5. Write the immutable snapshot (never mutate an existing COMPLETE one). Robustness: gate
+  // `reused` on the snapshot's data/head.json EXISTING, not merely the dir. A prior publish that
+  // created the dir but crashed before writing data/ leaves a wedged half-snapshot; treating the
+  // dir alone as "reused" would skip the data write and then crash at the cpSync of data/head.json
+  // (ENOENT) on every future publish. By checking the completion marker (data/head.json) we
+  // (re)write a half-built snapshot to completion instead of wedging. A genuinely complete snapshot
+  // is still left byte-identical (immutability preserved: we only write when incomplete).
   const snapshotDir = join(paths.snapshotsDir, snapshotId);
-  const reused = existsSync(snapshotDir);
+  const snapshotHead = join(snapshotDir, "data", "head.json");
+  const reused = existsSync(snapshotHead);
   if (!reused) {
     // Copy the prebuilt static bundle FIRST (index.html + assets/ + fonts/, NOT its dev data/),
-    // then write the real data/ on top so the snapshot is self-contained (decision F).
+    // then write the real data/ on top so the snapshot is self-contained (decision F). If a wedged
+    // half-snapshot dir exists, clear it first so the bundle copy starts clean.
+    if (existsSync(snapshotDir)) rmSync(snapshotDir, { recursive: true, force: true });
     mkdirSync(snapshotDir, { recursive: true });
     copySiteBundle(snapshotDir, dist);
     const dataDir = join(snapshotDir, "data");
     mkdirSync(dataDir, { recursive: true });
-    writeFileSync(join(dataDir, "head.json"), JSON.stringify(head, null, 2) + "\n", "utf8");
+    writeFileSync(snapshotHead, JSON.stringify(head, null, 2) + "\n", "utf8");
     writeFileSync(join(dataDir, "diff.json"), JSON.stringify(diff, null, 2) + "\n", "utf8");
   }
 

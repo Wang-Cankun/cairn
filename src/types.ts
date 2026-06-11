@@ -11,8 +11,9 @@
  *    NO freshness field on ClaimFile. `Freshness` appears only on read-time/published shapes.
  *  - Published head.json + snapshots contain CANONICAL CLAIMS ONLY (decision A). Drafts live
  *    only in the LOCAL terminal projection (`LocalHeadView`), never in a shared artifact.
- *  - Snapshot id = short content hash of the canonical claim SET ONLY, excluding timestamps
- *    (decision E). See SNAPSHOT_ID_FIELDS for the exact reproducible inputs.
+ *  - Snapshot id = short content hash of the published VIEW: the canonical claim SET INCLUDING
+ *    each claim's COMPUTED freshness {state, tier}, EXCLUDING all wall-clock timestamps
+ *    (decision E + Option X). See SNAPSHOT_ID_FIELDS for the exact reproducible inputs.
  */
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -106,7 +107,7 @@ export interface ClaimFile {
 /** Per-claim computed freshness, with the tier that produced it. */
 export interface Freshness {
   state: FreshnessState;
-  tier: Tier; // worst/representative tier among grounding edges (see CONTRACTS.md rule)
+  tier: Tier; // BEST tier among grounding edges (TIER_ORDER / bestTier; see CONTRACTS.md rule)
   as_of: string; // ISO timestamp this freshness was computed (publish time for published head)
 }
 
@@ -216,11 +217,16 @@ export interface SnapshotDiff {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /**
- * The EXACT, ordered inputs hashed to produce a snapshot id. Hash the canonical claim SET only,
- * EXCLUDING all timestamps/generated_at, so the same head is byte-reproducible. Each grounding
- * entry contributes (kind, ref, fingerprint, method, location); arrays are SORTED before hashing
- * (grounding by [ref,location]; depends_on lexicographically; claims by id). The id is a SHORT
- * (16 hex char) prefix of sha256 over the canonical JSON of this structure.
+ * The EXACT, ordered inputs hashed to produce a snapshot id. Hash the published VIEW: the canonical
+ * claim SET INCLUDING each claim's COMPUTED freshness {state, tier} (Option X), while EXCLUDING all
+ * wall-clock timestamps (as_of, published_at, created_at, generated_at), so the same published view
+ * is byte-reproducible AND a freshness-only change (artifact mutated -> refresh) yields a NEW id.
+ * Each grounding entry contributes (kind, ref, fingerprint, method, location); arrays are SORTED
+ * before hashing (grounding by [ref,location]; depends_on lexicographically; claims by id). The id
+ * is a SHORT (16 hex char) prefix of sha256 over the canonical JSON of this structure.
+ *
+ * NOTE: `freshness` carries {state, tier} ONLY — the `as_of` timestamp is deliberately excluded
+ * (semantic-free time stays out of identity; semantic state stays in).
  */
 export interface SnapshotIdInput {
   claims: Array<{
@@ -228,6 +234,7 @@ export interface SnapshotIdInput {
     text: string;
     status: "canonical"; // only canonical claims enter the id
     verification: Verification;
+    freshness: { state: FreshnessState; tier: Tier }; // computed at publish; NO timestamp
     grounding: Array<Pick<GroundingEdge, "kind" | "ref" | "fingerprint" | "method" | "location">>;
     depends_on: ClaimId[]; // sorted
   }>;
@@ -239,6 +246,7 @@ export const SNAPSHOT_ID_FIELDS = [
   "text",
   "status",
   "verification",
+  "freshness", // {state, tier} ONLY — computed at publish; the `as_of` timestamp is EXCLUDED
   "grounding", // each: kind, ref, fingerprint, method, location  (sorted by [ref, location])
   "depends_on", // sorted lexicographically
 ] as const;

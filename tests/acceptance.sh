@@ -3,8 +3,10 @@
 #
 # Exercises: add-claim (target-grounded, file-grounded, dep+file-grounded), a leftover zero-edge
 # draft, validate, publish (promote 3 + report leftover), canonical-only head.json, snapshot +
-# share-link integrity, a mutation -> refresh -> stale cascade, a second publish with a real diff +
-# immutable old snapshot + latest/ mirroring the NEW snapshot, and a negative reach-ground gate
+# share-link integrity, a mutation -> refresh -> stale cascade, and a FRESHNESS-ONLY second publish
+# (no change to the canonical set) that — under Option X (freshness is part of snapshot identity) —
+# still produces a NEW immutable snapshot id, mirrors the corrected `stale` freshness into
+# published/latest/, and leaves the first snapshot byte-identical. Plus a negative reach-ground gate
 # test. Exits NONZERO on the first failed assertion.
 #
 # Requires: the site bundle prebuilt at site/dist (run `bun run build:site` first).
@@ -117,17 +119,18 @@ C3STATE="$(bun -e 'const h=require(process.argv[1]);const c=h.claims.find(c=>c.i
 pass "after mutation+refresh: $C3 stale, head.json reflects it"
 
 # ==================================================================================
-echo "[8] second publish: new snapshot id, diff reports freshness change, old snapshot immutable"
+echo "[8] second publish: freshness-only change -> NEW snapshot id, latest shows stale, old snapshot immutable"
 # capture old snapshot bytes for immutability check
 OLD_HEAD_BYTES="$(shasum "$SNAPDIR/data/head.json" | awk '{print $1}')"
-# Materially change the head so a genuinely NEW content-addressed snapshot id is produced
-# (decision E excludes freshness from the id — a freshness-only change is, correctly, the SAME
-# snapshot). Grounding the leftover draft c4 promotes it on publish #2, changing the canonical set.
-cairn ground "$C4" --evidence file:outputs/model_metrics.json >/dev/null || die "ground c4 failed"
+# Option X: the snapshot id hashes the published VIEW INCLUDING computed freshness (timestamps
+# excluded). The artifact mutation in [7] + refresh made c3 genuinely stale, so a plain publish #2
+# (NO new grounding, NO change to the canonical SET) must still produce a NEW snapshot id — the
+# corrected freshness reaches the share link instead of the old `fresh` badge being re-copied.
 PUB2="$(cairn publish 2>&1)" || die "publish #2 nonzero exit:\n$PUB2"
 SNAP2="$(echo "$PUB2" | sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p')"
 [ -n "$SNAP2" ] || die "could not parse snapshot id from publish #2"
-[ "$SNAP2" != "$SNAP1" ] || die "publish #2 snapshot id should differ from #1 (freshness changed the head)"
+[ "$SNAP2" != "$SNAP1" ] || die "publish #2 snapshot id should DIFFER from #1 (freshness changed the published view)"
+echo "$PUB2" | grep -q "reused" && die "publish #2 must NOT hit the reused branch (freshness changed)"
 SNAPDIR2="$HOST/cairn/snapshots/$SNAP2"
 # diff.json of the NEW snapshot reports the freshness change against SNAP1
 DIFF2="$SNAPDIR2/data/diff.json"
@@ -135,6 +138,10 @@ AGAINST="$(bun -e 'const d=require(process.argv[1]);console.log(d.against)' "$DI
 [ "$AGAINST" = "$SNAP1" ] || die "diff #2 should be against $SNAP1, got $AGAINST"
 NFC="$(bun -e 'const d=require(process.argv[1]);console.log(d.counts.freshness_changed)' "$DIFF2")"
 [ "$NFC" -ge 1 ] || die "diff #2 should report >=1 freshness_changed, got $NFC"
+# published/latest shows the previously-fresh, now-mutated claim c3 as STALE (honest freshness
+# reached the collaborator — the whole point of the fix).
+C3LATEST="$(bun -e 'const h=require(process.argv[1]);const c=h.claims.find(c=>c.id===process.argv[2]);console.log(c?c.freshness.state:"MISSING")' "$LATEST/data/head.json" "$C3")"
+[ "$C3LATEST" = "stale" ] || die "published/latest should show $C3 as stale, got $C3LATEST"
 # old snapshot dir byte-identical (immutability)
 NEW_HEAD_BYTES="$(shasum "$SNAPDIR/data/head.json" | awk '{print $1}')"
 [ "$OLD_HEAD_BYTES" = "$NEW_HEAD_BYTES" ] || die "old snapshot $SNAP1 data/head.json was mutated (immutability violated)"
@@ -143,7 +150,7 @@ diff -q "$LATEST/data/head.json" "$SNAPDIR2/data/head.json" >/dev/null \
   || die "published/latest should now mirror NEW snapshot $SNAP2"
 diff -q "$LATEST/data/head.json" "$SNAPDIR/data/head.json" >/dev/null \
   && die "published/latest should NOT still mirror old snapshot $SNAP1"
-pass "publish #2: new snapshot $SNAP2, diff freshness_changed=$NFC vs $SNAP1, old snapshot immutable, latest mirrors new"
+pass "publish #2: freshness-only change -> new snapshot $SNAP2, latest shows $C3 stale, freshness_changed=$NFC vs $SNAP1, old snapshot immutable"
 
 # ==================================================================================
 echo "[9] negative: a canonical claim depending only on an ungrounded draft FAILS validate"

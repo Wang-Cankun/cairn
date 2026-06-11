@@ -38,28 +38,44 @@ export function toPublishedClaim(fm: ClaimFrontmatter, freshness: Freshness): Pu
 }
 
 /**
- * Compute the reproducible snapshot id (decision E): hash the canonical claim SET only, excluding
- * timestamps. Sort grounding by [ref,location], depends_on lexicographically, claims by id.
- * sha256 over canonical (stable-key) JSON; first SNAPSHOT_ID_LEN hex chars.
+ * Compute the reproducible snapshot id (decision E + Option X): hash the published VIEW the
+ * collaborator sees — the canonical claim SET INCLUDING each claim's COMPUTED freshness
+ * {state, tier} — while still EXCLUDING all wall-clock timestamps (as_of, published_at,
+ * created_at, generated_at). Freshness is semantic state and IS part of snapshot identity;
+ * timestamps are semantic-free time and are NOT.
+ *
+ * Sort grounding by [ref,location], depends_on lexicographically, claims by id. sha256 over
+ * canonical (stable-key) JSON; first SNAPSHOT_ID_LEN hex chars.
+ *
+ * `freshness` maps claim id -> computed Freshness (the result of computeFreshness at publish
+ * time). Only {state, tier} enter the hash — `as_of` is a timestamp and is excluded.
  */
-export function computeSnapshotId(canonical: ClaimFrontmatter[]): string {
+export function computeSnapshotId(
+  canonical: ClaimFrontmatter[],
+  freshness: Map<string, Freshness>,
+): string {
   const input: SnapshotIdInput = {
     claims: [...canonical]
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-      .map((fm) => ({
-        id: fm.id,
-        text: fm.text,
-        status: "canonical" as const,
-        verification: fm.verification,
-        grounding: sortGrounding(fm.grounding).map((g) => ({
-          kind: g.kind,
-          ref: g.ref,
-          fingerprint: g.fingerprint,
-          method: g.method,
-          location: g.location,
-        })),
-        depends_on: [...fm.depends_on].sort(),
-      })),
+      .map((fm) => {
+        const fr = freshness.get(fm.id);
+        if (!fr) throw new Error(`computeSnapshotId: missing freshness for ${fm.id}`);
+        return {
+          id: fm.id,
+          text: fm.text,
+          status: "canonical" as const,
+          verification: fm.verification,
+          freshness: { state: fr.state, tier: fr.tier },
+          grounding: sortGrounding(fm.grounding).map((g) => ({
+            kind: g.kind,
+            ref: g.ref,
+            fingerprint: g.fingerprint,
+            method: g.method,
+            location: g.location,
+          })),
+          depends_on: [...fm.depends_on].sort(),
+        };
+      }),
   };
   // Canonical JSON: keys are written in a fixed order by construction above; JSON.stringify
   // preserves insertion order for plain objects.

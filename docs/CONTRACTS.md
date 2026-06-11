@@ -22,8 +22,12 @@ below win, then the ADRs, then BUILD-BRIEF.
 - **(D) Evidence paths are HOST-ROOT-relative.** `location`/`ref` paths are relative to the host
   project root (the dir containing `cairn/`), never to cwd — re-fingerprinting is
   location-independent.
-- **(E) Snapshot id = content hash of the canonical claim SET only**, EXCLUDING
-  timestamps/`generated_at`, so the same head is byte-reproducible. See "Snapshot id" below.
+- **(E) Snapshot id = content hash of the published VIEW** the collaborator sees: the canonical
+  claim SET INCLUDING each claim's COMPUTED freshness `{state, tier}`, EXCLUDING all wall-clock
+  timestamps (`as_of`, `published_at`, `created_at`, `generated_at`). **Freshness state+tier are
+  part of snapshot identity; timestamps are not.** So the same view is byte-reproducible AND a
+  freshness-only change (artifact mutated → `refresh` → `publish`) yields a NEW id. See "Snapshot
+  id" below.
 - **(F) Site built once.** `publish` COPIES a prebuilt static bundle into the snapshot + writes
   `data/`. `publish` never runs a site build.
 - **(G) Frontend = vinext** emitting a fully static client-rendered bundle; if vinext can't, fall
@@ -145,10 +149,20 @@ drafts:    [ { id, text, grounded: boolean } ]
 
 ## 4. Snapshot layout & id (decisions B, E, F)
 
-`snapshots/<id>/` where `<id>` is the **short content hash of the canonical claim set, EXCLUDING
-timestamps** (decision E). Contains the prebuilt static site (`index.html` + `assets/` at the
-root) plus `data/head.json` and `data/diff.json`. **Never mutated after creation.**
+`snapshots/<id>/` where `<id>` is the **short content hash of the published VIEW** — the canonical
+claim set INCLUDING each claim's computed freshness `{state, tier}`, EXCLUDING all wall-clock
+timestamps (decision E + Option X). Contains the prebuilt static site (`index.html` + `assets/` at
+the root) plus `data/head.json` and `data/diff.json`. **Never mutated after creation.**
 `published/latest/` is a fresh COPY of the newest snapshot each publish (the stable share link).
+
+**Why freshness is in the id (the resolution of the C/E conflict).** The thing a snapshot
+content-addresses is the published VIEW the collaborator sees, and that view includes each claim's
+freshness badge. If the id hashed only the stamped fingerprints stored in claim files, the flow
+`publish (fresh) → artifact changes → refresh → publish` would recompute the SAME id, hit the
+`reused` branch, and re-copy the OLD snapshot into `published/latest/` — a genuinely STALE claim
+would keep showing a `fresh` badge on the share link forever. Including computed freshness in the
+id makes a freshness-only change a NEW immutable snapshot, so the corrected freshness reaches the
+collaborator. **Freshness state+tier are part of snapshot identity; timestamps are not.**
 
 ### Snapshot id computation (reproducible)
 
@@ -156,13 +170,16 @@ TS: `SnapshotIdInput`, `SNAPSHOT_ID_FIELDS`, `SNAPSHOT_ID_LEN`.
 
 1. Take canonical claims ONLY.
 2. For each claim keep, IN THIS FIELD ORDER: `id`, `text`, `status` (always `"canonical"`),
-   `verification`, `grounding`, `depends_on`. EXCLUDE `created_at` and any timestamp.
+   `verification`, `freshness` (`{state, tier}` ONLY — the computed freshness at publish time, with
+   its `as_of` timestamp EXCLUDED), `grounding`, `depends_on`. EXCLUDE `created_at` and ALL
+   timestamps (`as_of`, `published_at`, `created_at`, `generated_at`).
 3. Each grounding entry contributes `{kind, ref, fingerprint, method, location}`.
 4. SORT: grounding edges by `[ref, location]`; `depends_on` lexicographically; claims by `id`.
 5. Serialize to canonical (stable-key) JSON; `sha256`; take the first **16 hex chars** = the id.
 
-Same head ⇒ same id, byte-for-byte. Timestamps live OUTSIDE the id (in `published_at` /
-`freshness.as_of`).
+Same view (same claims + same computed freshness) ⇒ same id, byte-for-byte (idempotent no-op
+republish). A freshness-only change ⇒ NEW id. Timestamps ALWAYS live OUTSIDE the id (in
+`published_at` / `freshness.as_of`).
 
 ---
 
