@@ -1,0 +1,17 @@
+# local store / snapshots (generated, not source)
+*.db
+*.sqlite
+*.sqlite3
+/snapshots/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# runtimes
+node_modules/
+__pycache__/
+.venv/
+venv/
+.env
