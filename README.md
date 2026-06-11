@@ -110,3 +110,8 @@ Then start a fresh session and point the model at `docs/BUILD-BRIEF.md` to scaff
 The acceptance test is in the build brief: publish one real project's results as a few
 claims, share a read-only link, and check that (a) a collaborator reads it and (b) a fresh
 session fed only the canonical head answers "where are we / what next" correctly.
+
+## System card
+
+For the long-form "why" — the narrative that explains and ties together the decisions above for
+human collaborators and fresh AI sessions — see [`system-card/README.md`](system-card/README.md).
