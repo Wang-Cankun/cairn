@@ -4,6 +4,14 @@ Domain-neutral (generic data analysis). This is the crystallized output of a des
 diagnosis that turned "should I build a results-sharing collaboration platform?" into a
 schema you can build.
 
+> **Status:** background reasoning, written before the grilling pass. Still largely valid, but
+> where it predates the ADRs it is **superseded** — see `../CONTEXT.md` and `adr/`. Specifically:
+> freshness is now derived from the **evidence fingerprint**, not the compute DAG (ADR-0002);
+> the source of truth is **files-in-git**, with SQLite as a derived index, not SQLite itself
+> (ADR-0003); authoring is **soft (draft)** with the iron rule enforced at the canonical
+> boundary (ADR-0001). The primary interface is the **agent loop**, with the published site
+> secondary.
+
 ---
 
 ## 0. The dissolve
@@ -40,7 +48,7 @@ So Cairn is not a platform. It is a **read-only canonical projection of a claim 
 
 | Axis | Values | Source | v1 |
 |---|---|---|---|
-| **Freshness** | `fresh` / `stale` | **Derived from the compute DAG** (upstream hash changed ⇒ stale; cascades downstream) | ✅ build it — free, deterministic, never hand-set or AI-guessed |
+| **Freshness** | `fresh` / `stale` / `unknown` | **Derived from the evidence fingerprint** (artifact changed ⇒ stale; unreachable ⇒ unknown; cascades downstream). *Superseded mechanism — see ADR-0002; this row originally said "from the compute DAG."* | ✅ build it — never hand-set or AI-guessed |
 | **Verification** | `verified` / `unverified` / `contradicted` | claim↔evidence checked against an external oracle (a forward model over a curated reference) | ❌ defer to v2 |
 
 Principle: **anything that can be made deterministic should be.** Staleness is deterministic —

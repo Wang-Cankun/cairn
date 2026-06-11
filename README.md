@@ -24,21 +24,29 @@ generic document/notes tool.
 
 ## The whole v1, in three rules
 
-1. **Every claim must have at least one edge**, and following edges upward must reach the
-   ground (a dataset / run / file) — no claim may rest only on other claims. Enforced by the
-   schema; a claim that can't reach ground cannot enter `main` or be shared.
-2. **Freshness is derived, not typed.** `fresh` / `stale` is computed from the compute DAG
-   (did anything upstream change?). It is never hand-set and never AI-guessed.
+1. **Every claim must reach the ground.** A claim has ≥1 edge, and following dependency edges
+   upward must terminate at a real artifact (a dataset / run / file) — no claim may rest only on
+   other claims. Drafts may be ungrounded while you work; the rule bites at the **promotion gate**
+   to canonical, so nothing ungrounded is ever shared.
+2. **Freshness is derived from the evidence fingerprint, not typed.** `fresh` / `stale` /
+   `unknown` is computed by comparing the artifact's fingerprint to what was stamped at
+   authoring — never hand-set, never AI-guessed. `unknown` (artifact unreachable) is a legal,
+   honest state.
 3. **Each publish is an immutable snapshot.** The head moves forward; reruns cascade staleness;
    a reader sees what changed since the version they last saw.
 
 ## How to use this repo
 
-This repo is the design brief, not the code yet. To build v1:
+This repo is the design brief, not the code yet. Read order (later docs win where they differ):
 
-1. Read `docs/DESIGN.md` — the full v1 skeleton and the reasoning behind each constraint.
-2. Read `docs/BUILD-BRIEF.md` — the concrete, buildable spec and acceptance test.
-3. Start a fresh session and point the model at `docs/BUILD-BRIEF.md` to scaffold v1.
+1. `CONTEXT.md` — glossary + the canonical, current decisions. **Authoritative.**
+2. `docs/adr/` — the resolved design forks (0001 draft authoring, 0002 evidence-fingerprint
+   freshness, 0003 files-in-git truth). **Authoritative.**
+3. `docs/BUILD-BRIEF.md` — the concrete, buildable spec + acceptance test (reflects the ADRs).
+4. `docs/DESIGN.md` — background reasoning. Largely valid, but where it predates the ADRs
+   (freshness mechanism; storage), the ADRs and `CONTEXT.md` win.
+
+Then start a fresh session and point the model at `docs/BUILD-BRIEF.md` to scaffold v1.
 
 The acceptance test is in the build brief: publish one real project's results as a few
 claims, share a read-only link, and check that (a) a collaborator reads it and (b) a fresh
