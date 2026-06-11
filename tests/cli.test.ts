@@ -73,6 +73,29 @@ describe("CLI smoke test (temp host fixture)", () => {
     expect(status.stdout).toContain(`last snapshot: ${published.snapshot.current}`);
   });
 
+  test("status reports the real last snapshot even after head/refresh clobber cairn/head.json", () => {
+    // Regression: head/refresh rewrite cairn/head.json with snapshot.current="". status must read
+    // lineage from published/latest/ (the durable source publish trusts), not cairn/head.json,
+    // else it reports "last snapshot: (none)" right after a real publish.
+    const host = mkdtempSync(join(tmpdir(), "cairn-status-"));
+    writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");
+    run(host, ["add-claim", "--text", "A claim.", "--evidence", "file:scores.csv"]);
+    const pub = run(host, ["publish"]);
+    const snapId = (pub.stdout.match(/published snapshot (\w+)/) ?? [])[1];
+    expect(snapId).toBeTruthy();
+
+    // Normal agent loop: orient via `head` (and `refresh`), which clobber cairn/head.json.
+    expect(run(host, ["head"]).code).toBe(0);
+    expect(run(host, ["refresh"]).code).toBe(0);
+    // cairn/head.json now carries no snapshot id...
+    const headJson = JSON.parse(readFileSync(join(host, "cairn", "head.json"), "utf8"));
+    expect(headJson.snapshot.current).toBe("");
+    // ...yet status still reports the real snapshot from published/latest/.
+    const status = run(host, ["status"]);
+    expect(status.code).toBe(0);
+    expect(status.stdout).toContain(`last snapshot: ${snapId}`);
+  });
+
   test("publish is reproducible: same head -> same snapshot id (excludes timestamps)", () => {
     const host = mkdtempSync(join(tmpdir(), "cairn-repro-"));
     writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");

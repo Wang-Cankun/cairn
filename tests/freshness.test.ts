@@ -54,6 +54,34 @@ describe("freshness from evidence fingerprint", () => {
     expect(fr.get("claim-20260610-002")!.state).toBe("stale"); // cascaded from A
   });
 
+  test("cascade reaches fixpoint through a cycle (A<->B, A also deps a stale leaf -> both stale)", () => {
+    // Regression for the silent false-fresh under-report: A and B form a dependency cycle, and A
+    // additionally depends on a stale leaf S. Correct per CONTRACTS §9: A=stale, B=stale (B deps A).
+    // A memoized DFS short-circuiting on in-progress cycle nodes reported B=FRESH, order-dependently.
+    const { hostRoot } = tempHost();
+    putArtifact(hostRoot, "out/s.csv", "v1");
+    const sEdge = stampEdge(hostRoot, "file", "out/s.csv");
+    putArtifact(hostRoot, "out/ab.csv", "vab");
+    const abEdge = stampEdge(hostRoot, "file", "out/ab.csv");
+    putArtifact(hostRoot, "out/s.csv", "v2"); // S becomes stale
+
+    const s = cf(fm({ id: "claim-20260610-000", status: "canonical", grounding: [sEdge] }));
+    const a = cf(
+      fm({ id: "claim-20260610-001", status: "canonical", grounding: [abEdge], depends_on: ["claim-20260610-002", "claim-20260610-000"] }),
+    );
+    const b = cf(
+      fm({ id: "claim-20260610-002", status: "canonical", grounding: [abEdge], depends_on: ["claim-20260610-001"] }),
+    );
+
+    // Both claim orderings must agree (order-independence).
+    for (const order of [[s, a, b], [b, a, s]] as ClaimFile[][]) {
+      const fr = computeFreshness(order, hostRoot, AS_OF);
+      expect(fr.get("claim-20260610-000")!.state).toBe("stale"); // the leaf
+      expect(fr.get("claim-20260610-001")!.state).toBe("stale"); // A: own fresh, deps S(stale)
+      expect(fr.get("claim-20260610-002")!.state).toBe("stale"); // B: own fresh, deps A(stale) via cycle
+    }
+  });
+
   test("cascade is cycle-safe (mutual deps do not hang)", () => {
     const { hostRoot } = tempHost();
     putArtifact(hostRoot, "out/a.csv", "v1");

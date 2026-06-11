@@ -13,8 +13,11 @@
  *   - else unknown if any edge is unknown;
  *   - else fresh.
  *
- * Tier = best tier among the claim's grounding edges (TIER_ORDER). Dependency cascade is
- * cycle-safe (visited set).
+ * Tier = best tier among the claim's grounding edges (TIER_ORDER). The dependency cascade is
+ * resolved to a FIXPOINT by forward-propagating staleness over the dep graph, so it is both
+ * cycle-safe AND order-independent: any claim transitively reachable to a stale node becomes
+ * stale even when it sits in a dependency cycle (the failure a memoized DFS short-circuiting on
+ * in-progress cycle nodes silently under-reports — CONTRACTS §9).
  */
 
 import { fingerprintByMethod, UNKNOWN } from "./fingerprint.ts";
@@ -80,40 +83,40 @@ export function computeFreshness(
     tiers.set(fm.id, bestTier(fm.grounding));
   }
 
-  // Resolve final state with cascade. stale dominates; cycle-safe via visited + in-progress.
+  // Resolve the cascade to a FIXPOINT (CONTRACTS §9: "stale if any depends_on is stale, cascade").
+  // We forward-propagate staleness over the dependency graph rather than a memoized DFS that
+  // short-circuits on in-progress cycle nodes (that under-reports: a claim in a dep cycle that
+  // transitively depends on a stale node could be silently reported fresh, and order-dependently).
+  //
+  // Start from each claim's own pre-cascade state, then repeatedly: any claim whose own state is
+  // not already stale becomes stale if ANY of its in-set depends_on is stale. Iterate until a full
+  // pass makes no change. Monotone (states only move TO stale, never away), so it terminates in at
+  // most N passes regardless of cycles. Non-stale states (fresh/unknown) keep their own value —
+  // cascade only propagates stale (the enemy is a false `fresh`, never a false `stale`).
   const resolved = new Map<string, FreshnessState>();
-  const inProgress = new Set<string>();
+  for (const c of claims) resolved.set(c.frontmatter.id, own.get(c.frontmatter.id) ?? "unknown");
 
-  const resolve = (id: string): FreshnessState => {
-    const cached = resolved.get(id);
-    if (cached) return cached;
-    const fm = byId.get(id);
-    if (!fm) return "unknown"; // unknown claim referenced; treat conservatively
-    if (inProgress.has(id)) {
-      // Cycle: fall back to this claim's own state without further cascade.
-      return own.get(id) ?? "unknown";
-    }
-    inProgress.add(id);
-    let state = own.get(id) ?? "unknown";
-    if (state !== "stale") {
-      for (const dep of fm.depends_on) {
-        if (!byId.has(dep)) continue;
-        const ds = resolve(dep);
-        if (ds === "stale") {
-          state = "stale";
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const c of claims) {
+      const id = c.frontmatter.id;
+      if (resolved.get(id) === "stale") continue; // already stale; cannot move further
+      for (const dep of c.frontmatter.depends_on) {
+        if (!byId.has(dep)) continue; // out-of-set dep can't make us stale on its own
+        if (resolved.get(dep) === "stale") {
+          resolved.set(id, "stale");
+          changed = true;
           break;
         }
       }
     }
-    inProgress.delete(id);
-    resolved.set(id, state);
-    return state;
-  };
+  }
 
   const out = new Map<string, Freshness>();
   for (const c of claims) {
     const id = c.frontmatter.id;
-    out.set(id, { state: resolve(id), tier: tiers.get(id) ?? "weak", as_of });
+    out.set(id, { state: resolved.get(id) ?? "unknown", tier: tiers.get(id) ?? "weak", as_of });
   }
   return out;
 }

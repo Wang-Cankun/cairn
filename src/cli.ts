@@ -21,6 +21,7 @@ import {
   writeClaim,
 } from "./store.ts";
 import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   ClaimFrontmatter,
   DraftView,
@@ -221,10 +222,15 @@ function cmdStatus(paths: StorePaths): void {
   const canonical = claims.filter((c) => c.frontmatter.status === "canonical").length;
   const drafts = claims.filter((c) => c.frontmatter.status === "draft");
   const ungrounded = drafts.filter((c) => c.frontmatter.grounding.length === 0).length;
+  // Read the last snapshot id from published/latest/data/head.json — the DURABLE lineage source
+  // publish trusts (publish.ts readPreviousHead). cairn/head.json is NOT used here: `head` and
+  // `refresh` clobber it with snapshot.current="" (they are read-only re: lineage), so reading it
+  // would report "(none)" right after a real publish. latest/ only ever holds a published head.
   let lastSnapshot = "(none)";
-  if (existsSync(paths.headJsonPath)) {
+  const latestHead = join(paths.publishedLatestDir, "data", "head.json");
+  if (existsSync(latestHead)) {
     try {
-      const h = JSON.parse(readFileSync(paths.headJsonPath, "utf8"));
+      const h = JSON.parse(readFileSync(latestHead, "utf8"));
       if (h?.snapshot?.current) lastSnapshot = h.snapshot.current;
     } catch {
       /* ignore */
