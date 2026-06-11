@@ -61,6 +61,15 @@ Two cross-cutting checks for any change:
   one, tell that story rather than smoothing it over — the instructive moments are part of the
   card's value.
 
+## The consolidated single-file version
+
+`cairn-system-card-v1.md` is a generated concatenation of the modular documents (in the reading
+order from `README.md`), provided for readers and tools that prefer one artifact. It is **derived,
+not authored** — the modular files are the maintained originals. Whenever you change a modular
+document, regenerate the consolidated file from the same ordered list so the two never drift; if
+they ever disagree, the modular file wins. The consolidation only retitles each document's top
+heading down one level and prepends a table of contents — it adds no content of its own.
+
 ## When the card is doing its job
 
 The test is the same one Cairn applies to itself: hand this folder (and nothing else) to a fresh AI
