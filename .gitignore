@@ -1,8 +1,11 @@
-# local store / snapshots (generated, not source)
+# derived SQLite index (rebuilt on demand; never source of truth)
 *.db
 *.sqlite
 *.sqlite3
+
+# generated snapshots / published share dirs (only relevant inside a host store)
 /snapshots/
+/cairn/published/
 
 # os / editor
 .DS_Store

@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cairn v1 — Architecture Plan</title>
+<style>
+  @font-face {
+    font-family: "Inter var";
+    font-style: normal;
+    font-weight: 100 900;
+    font-display: swap;
+    src: url("https://rsms.me/inter/font-files/InterVariable.woff2") format("woff2");
+  }
+  :root {
+    --bg: #0b0c0e;
+    --panel: #131519;
+    --panel-2: #181b20;
+    --line: #262a31;
+    --ink: #e9ecf1;
+    --ink-dim: #a3aab6;
+    --ink-faint: #6b7280;
+    --accent: #7c9cff;
+    --accent-soft: #2a3350;
+    --fresh: #5ad19a;
+    --stale: #f0a14b;
+    --unknown: #8b93a3;
+    --danger: #f06a6a;
+    --radius: 14px;
+    --maxw: 980px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f8fa; --panel: #ffffff; --panel-2: #f1f3f6; --line: #e3e6eb;
+      --ink: #14171c; --ink-dim: #4a515c; --ink-faint: #8b929d;
+      --accent: #3a5bd9; --accent-soft: #e4eaff;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: "Inter var", Inter, system-ui, -apple-system, sans-serif;
+    font-feature-settings: "cv05" 1, "ss03" 1, "cv11" 1;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.6;
+    letter-spacing: -0.011em;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+  header.hero {
+    padding: 88px 0 56px;
+    border-bottom: 1px solid var(--line);
+    background:
+      radial-gradient(1200px 400px at 50% -200px, var(--accent-soft) 0%, transparent 70%);
+  }
+  .eyebrow {
+    font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 14px;
+  }
+  h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.04; margin: 0 0 18px; font-weight: 760; letter-spacing: -0.03em; }
+  .lede { font-size: clamp(17px, 2.4vw, 20px); color: var(--ink-dim); max-width: 70ch; margin: 0; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
+  .pill {
+    font-size: 12.5px; font-weight: 550; padding: 6px 12px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--ink-dim);
+  }
+  .pill strong { color: var(--ink); font-weight: 650; }
+  main { padding: 16px 0 100px; }
+  section { padding: 48px 0; border-bottom: 1px solid var(--line); }
+  section:last-child { border-bottom: none; }
+  h2 { font-size: 13px; font-weight: 650; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
+  h2 + .h2sub { font-size: clamp(22px, 3.2vw, 30px); font-weight: 680; letter-spacing: -0.02em; margin: 0 0 28px; color: var(--ink); }
+  p { color: var(--ink-dim); }
+  a { color: var(--accent); text-decoration: none; }
+  code { font-family: "SFMono-Regular", ui-monospace, Menlo, monospace; font-size: 0.88em; background: var(--panel-2); border: 1px solid var(--line); padding: 1.5px 6px; border-radius: 6px; color: var(--ink); }
+
+  /* layer diagram */
+  .stack { display: grid; gap: 12px; }
+  .layer {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px; position: relative; overflow: hidden;
+  }
+  .layer::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: 0.7; }
+  .layer h3 { margin: 0 0 4px; font-size: 16px; font-weight: 640; display: flex; align-items: center; gap: 10px; }
+  .layer .tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 6px; background: var(--accent-soft); color: var(--accent); letter-spacing: 0.02em; }
+  .layer p { margin: 0; font-size: 14.5px; }
+  .layer .flow { font-size: 12.5px; color: var(--ink-faint); margin-top: 8px; font-family: ui-monospace, monospace; }
+  .arrow { text-align: center; color: var(--ink-faint); font-size: 18px; line-height: 1; margin: -4px 0; }
+
+  /* cards grid */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; }
+  .card h3 { margin: 0 0 8px; font-size: 15.5px; font-weight: 640; }
+  .card p { margin: 0; font-size: 14px; }
+  .card .num { font-size: 12px; font-weight: 700; color: var(--accent); letter-spacing: 0.1em; }
+
+  /* rules */
+  .rule { display: flex; gap: 16px; padding: 18px 0; border-bottom: 1px dashed var(--line); }
+  .rule:last-child { border-bottom: none; }
+  .rule .idx { font-size: 26px; font-weight: 750; color: var(--accent); line-height: 1; min-width: 38px; }
+  .rule h3 { margin: 0 0 4px; font-size: 16px; font-weight: 640; }
+  .rule p { margin: 0; font-size: 14px; }
+
+  /* badges demo */
+  .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+  .badge { font-size: 12px; font-weight: 600; padding: 4px 11px; border-radius: 999px; border: 1px solid; display: inline-flex; align-items: center; gap: 6px; }
+  .badge::before { content: ""; width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+  .b-fresh { color: var(--fresh); border-color: color-mix(in srgb, var(--fresh) 40%, transparent); }
+  .b-stale { color: var(--stale); border-color: color-mix(in srgb, var(--stale) 40%, transparent); }
+  .b-unknown { color: var(--unknown); border-color: color-mix(in srgb, var(--unknown) 40%, transparent); }
+  .b-unver { color: var(--ink-dim); border-color: var(--line); }
+
+  /* code block */
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; overflow-x: auto; font-size: 13px; line-height: 1.65; color: var(--ink-dim); }
+  pre .k { color: var(--accent); }
+  pre .c { color: var(--ink-faint); font-style: italic; }
+  pre .s { color: var(--fresh); }
+
+  /* touchpoints timeline */
+  .timeline { position: relative; padding-left: 28px; }
+  .timeline::before { content: ""; position: absolute; left: 7px; top: 6px; bottom: 6px; width: 2px; background: var(--line); }
+  .tp { position: relative; padding: 0 0 22px; }
+  .tp::before { content: ""; position: absolute; left: -28px; top: 4px; width: 16px; height: 16px; border-radius: 999px; background: var(--bg); border: 2px solid var(--accent); }
+  .tp:last-child { padding-bottom: 0; }
+  .tp h3 { margin: 0 0 3px; font-size: 15px; font-weight: 640; }
+  .tp p { margin: 0 0 6px; font-size: 14px; }
+  .tp code { font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-faint); font-weight: 600; }
+  td { color: var(--ink-dim); }
+  td strong { color: var(--ink); font-weight: 600; }
+
+  .note { background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 10px; padding: 14px 18px; font-size: 14px; color: var(--ink-dim); margin-top: 18px; }
+  .note strong { color: var(--ink); }
+
+  .scope { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .scope { grid-template-columns: 1fr; } }
+  .scope .col { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px 20px; }
+  .scope ul { margin: 8px 0 0; padding-left: 18px; font-size: 14px; color: var(--ink-dim); }
+  .scope li { margin: 5px 0; }
+  .scope .yes h3 { color: var(--fresh); }
+  .scope .no h3 { color: var(--stale); }
+  .scope h3 { font-size: 14px; margin: 0; font-weight: 640; }
+
+  footer { padding: 40px 0 60px; color: var(--ink-faint); font-size: 13px; }
+
+  /* entrance motion */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal { opacity: 0; transform: translateY(14px); animation: rise 0.7s cubic-bezier(0.22,1,0.36,1) forwards; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+    section:nth-child(1) .reveal { animation-delay: 0.02s; }
+  }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap reveal">
+    <p class="eyebrow">Cairn · v1 build plan</p>
+    <h1>A read-only canonical projection of a claim graph.</h1>
+    <p class="lede">Agentic-AI-ready-first. An AI coding agent authors <em>claims</em> — conclusions grounded in evidence — into a local, file-as-truth store during normal analysis work; humans and fresh AI sessions read a published, immutable projection. This is the architecture I'll build.</p>
+    <div class="meta-row">
+      <span class="pill"><strong>Core:</strong> Bun + TypeScript</span>
+      <span class="pill"><strong>Index:</strong> bun:sqlite (derived, in-memory)</span>
+      <span class="pill"><strong>Site:</strong> React on vinext</span>
+      <span class="pill"><strong>Store:</strong> <code>cairn/</code> subdir in host repo</span>
+      <span class="pill"><strong>Truth:</strong> plain-text claim files in git</span>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section>
+    <h2>01 · The layered architecture</h2>
+    <div class="h2sub">Eight pieces, one direction of flow</div>
+    <div class="stack">
+      <div class="layer reveal">
+        <h3>Agent (Claude Code) <span class="tag">primary actor</span></h3>
+        <p>Drives everything through the <strong>Skill</strong>. The only thing that can <em>cause</em> a claim to exist. Reads the canonical head at session start to orient instantly.</p>
+        <div class="flow">drives ↓</div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="layer reveal">
+        <h3>Skill — the protocol <span class="tag">causes writes</span></h3>
+        <p>A Claude Code skill (markdown capability injection) teaching the 4-touchpoint loop: Orient → Author → Refresh → Publish. Low-friction authoring is the anti-forgetting mechanism.</p>
+        <div class="flow">invokes ↓</div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="layer reveal">
+        <h3>CLI — sole writer <span class="tag">constrains</span></h3>
+        <p>The <em>only</em> write path. Verbs: <code>head · add-claim · ground · refresh · validate · publish · drafts · status</code>. Does structural checks files can't express. Deterministic, auditable.</p>
+        <div class="flow">writes ↓ &nbsp;·&nbsp; rebuilds-on-demand ↘</div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="layer reveal">
+        <h3>Claim files in git <span class="tag">source of truth</span></h3>
+        <p>One tiny markdown+frontmatter file per claim under <code>cairn/claims/</code>. Text-only forever — references artifacts by <code>path + fingerprint</code>, never ingests bytes. Changes show up in <code>git diff</code> for free.</p>
+        <div class="flow">references (never copies) → evidence artifacts (gitignored / remote / external volume)</div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="layer reveal">
+        <h3>SQLite — derived index <span class="tag">disposable</span></h3>
+        <p>Rebuilt on demand in memory (<code>bun:sqlite</code>) from the claim files. Powers the recursive reach-ground query, freshness computation, and diffs. <strong>Never a source of truth.</strong></p>
+        <div class="flow">feeds ↓</div>
+      </div>
+      <div class="arrow">↓</div>
+      <div class="layer reveal">
+        <h3>Publish → immutable Snapshot <span class="tag">portable</span></h3>
+        <p>Content-addressed freeze of the canonical head + diff vs previous + the static React site bundled in. Files today, a Cloudflare Worker later — same artifact, no rewrite.</p>
+        <div class="flow">serves → ① read-only site (Collaborator) &nbsp; ② head.json (Fresh agent session)</div>
+      </div>
+    </div>
+    <div class="note reveal"><strong>Cause vs constrain.</strong> The Skill <em>causes</em> claims to be written (the schema can't author). The CLI + files <em>constrain</em> what's allowed to reach canonical (the skill can't enforce). You need both.</div>
+  </section>
+
+  <section>
+    <h2>02 · The three hard rules</h2>
+    <div class="h2sub">Non-negotiable. Everything else is swappable.</div>
+
+    <div class="rule reveal">
+      <div class="idx">1</div>
+      <div>
+        <h3>Every claim must reach the ground</h3>
+        <p>A claim has ≥1 edge, and following <code>depends_on</code> edges upward must terminate at a real artifact — never resting only on other claims (that's circular reasoning in a provenance costume). Enforced by a recursive SQL reach-ground query <strong>at the draft→canonical promotion gate</strong>, not at write time. Drafts may be ungrounded while you work; nothing ungrounded is ever shared.</p>
+      </div>
+    </div>
+    <div class="rule reveal">
+      <div class="idx">2</div>
+      <div>
+        <h3>Freshness is computed from the evidence fingerprint, never typed</h3>
+        <p><code>fresh</code> / <code>stale</code> / <code>unknown</code> comes from comparing the artifact's fingerprint now to what was stamped at authoring — never hand-set, never AI-guessed, never a field in the file. Quality is <strong>tiered</strong> and shown on the badge. <code>unknown</code> (artifact unreachable) is a legal, honest state. A false <code>fresh</code> is the enemy.</p>
+        <div class="badges">
+          <span class="badge b-fresh">fresh · pipeline-meta</span>
+          <span class="badge b-stale">stale · sha256</span>
+          <span class="badge b-unknown">unknown · remote-md5</span>
+          <span class="badge b-unver">unverified</span>
+        </div>
+      </div>
+    </div>
+    <div class="rule reveal">
+      <div class="idx">3</div>
+      <div>
+        <h3>Each publish is an immutable snapshot + diff</h3>
+        <p>The head moves forward; reruns cascade staleness; a reader sees exactly what changed since the snapshot they last saw ("Since &lt;prev&gt;: N changed"). Past snapshots are never mutated — content-addressed by a hash of their head data.</p>
+      </div>
+    </div>
+    <div class="note reveal"><strong>canonical ≠ verified.</strong> Publishing makes a version the agreed current record, never <em>true</em>. Verification is a separate axis; v1 stores an honest <code>unverified</code> default only — the machinery is v2.</div>
+  </section>
+
+  <section>
+    <h2>03 · The claim file</h2>
+    <div class="h2sub">Source of truth — deliberately no freshness field</div>
+<pre><span class="c">--- cairn/claims/claim-20260610-001.md ---</span>
+<span class="k">id:</span> claim-20260610-001
+<span class="k">text:</span> <span class="s">"Step-07 scoring separates the two cohorts (AUC 0.91)"</span>
+<span class="k">status:</span> draft            <span class="c"># draft | canonical  (draft may be ungrounded)</span>
+<span class="k">verification:</span> unverified  <span class="c"># v1: honest default only</span>
+<span class="k">grounding:</span>               <span class="c"># claim → evidence  (≥1 required to leave draft)</span>
+  - <span class="k">kind:</span> target        <span class="c"># target | file | data | external</span>
+    <span class="k">ref:</span> results_step_07
+    <span class="k">fingerprint:</span> 90e13daf5941a99d
+    <span class="k">method:</span> pipeline-meta <span class="c"># top tier — read from _targets/meta/meta</span>
+  - <span class="k">kind:</span> file
+    <span class="k">ref:</span> outputs/step07_scores.csv
+    <span class="k">fingerprint:</span> <span class="s">"sha256:…"</span>
+    <span class="k">method:</span> sha256
+<span class="k">depends_on:</span>              <span class="c"># claim → claim; does NOT count as grounding</span>
+  - claim-20260609-014
+<span class="k">created_at:</span> 2026-06-10T20:00:00-04:00
+<span class="c">---
+Optional freeform notes / caveats. Not parsed in v1.</span></pre>
+    <div class="note reveal"><strong>Fingerprint tiers (honest about rigor):</strong> a pipeline tool's content hash (targets' <code>_targets/meta/meta</code>) is top tier and free; a direct <code>sha256</code> of a loose file is mid; a self-reported remote <code>md5sum</code> is lower; an unreachable artifact reads <code>unknown</code>. The tier is always shown — never flattened.</div>
+  </section>
+
+  <section>
+    <h2>04 · The skill — the agent's 4-touchpoint loop</h2>
+    <div class="h2sub">The only authoring driver in v1</div>
+    <div class="timeline">
+      <div class="tp reveal">
+        <h3>① Orient — at session start</h3>
+        <p>Read canonical state + pending drafts before acting. This is what lets a fresh session land oriented.</p>
+        <code>cairn head</code>
+      </div>
+      <div class="tp reveal">
+        <h3>② Author — the moment you conclude anything</h3>
+        <p>One cheap, in-flow call. Draft-soft, so there's no friction tax that breeds avoidance. Ground it a moment later if needed.</p>
+        <code>cairn add-claim --text "…" --evidence file:outputs/scores.csv</code>
+      </div>
+      <div class="tp reveal">
+        <h3>③ Refresh — after any rerun</h3>
+        <p>Recompute freshness, surface newly-stale claims to the user.</p>
+        <code>cairn refresh</code>
+      </div>
+      <div class="tp reveal">
+        <h3>④ Publish — before sharing</h3>
+        <p>Reach-ground gate, then freeze a snapshot + diff. Relays the warn-only reconcile honestly.</p>
+        <code>cairn validate &amp;&amp; cairn publish</code>
+      </div>
+    </div>
+    <div class="note reveal"><strong>Enforcement model (v1): make lapses visible, don't pretend they were prevented.</strong> <code>publish</code> runs a <em>warn-only</em> reconcile — it reports conclusions in the shared findings that carry no claim id, and drafts left ungrounded, but does not block. Claude Code <strong>hooks</strong> that nudge without relying on goodwill are the v2 hardening.</div>
+  </section>
+
+  <section>
+    <h2>05 · The published projection — two readers, one store</h2>
+    <div class="h2sub">React site on vinext, emitted as static assets inside every snapshot</div>
+    <div class="grid">
+      <div class="card reveal">
+        <span class="num">READER A</span>
+        <h3>Collaborator</h3>
+        <p>A static, read-only page. No login, just a link — friction below "open a zip." Each claim shows its text, terse grounding refs, an honest freshness badge (state + tier) and verification badge, with the diff-since-prev banner at the top. Portable enough to later serve from a Cloudflare Worker unchanged.</p>
+      </div>
+      <div class="card reveal">
+        <span class="num">READER B</span>
+        <h3>Fresh agent session</h3>
+        <p><code>head.json</code> — a compact, typed snapshot of the canonical head: each claim's id/text/verification/derived-freshness/edges, plus open drafts. <strong>Selected state, not a transcript dump.</strong> The acceptance test feeds <em>only</em> this to a new session and asks "where are we / what next."</p>
+      </div>
+    </div>
+    <div class="note reveal"><strong>Frontend stack &amp; taste:</strong> React on <a href="https://vinext.io/">vinext</a> (Cloudflare's Vite-based Next.js reimplementation) building to fully static assets that fetch relative <code>./data/head.json</code> + <code>./data/diff.json</code> and render client-side. Self-hosted <strong>Inter variable</strong>, generous whitespace, strong type hierarchy, light/dark via <code>prefers-color-scheme</code>. Motion: staggered card entrance, spring hover micro-interactions, View Transitions, scroll-driven reveals — all gated behind <code>prefers-reduced-motion</code>. <em>vinext is &lt;1 week old &amp; experimental; if it blocks static output, I fall back to plain Vite + React with the same components and tell you.</em></div>
+  </section>
+
+  <section>
+    <h2>06 · Fingerprint methods &amp; freshness cascade</h2>
+    <div class="h2sub">How "did it change?" is answered, by tier</div>
+    <table class="reveal">
+      <thead><tr><th>Method</th><th>Source</th><th>Tier</th><th>Re-check at refresh</th></tr></thead>
+      <tbody>
+        <tr><td><strong>pipeline-meta</strong></td><td>targets <code>_targets/meta/meta</code> data column</td><td>Top (rigorous, free)</td><td>Re-read meta row, compare hash</td></tr>
+        <tr><td><strong>sha256</strong></td><td>Direct hash of a loose local file</td><td>Mid</td><td>Re-hash file at <code>location</code></td></tr>
+        <tr><td><strong>size-mtime</strong></td><td>Weak fallback when hashing is too costly</td><td>Low</td><td>Re-stat, compare size+mtime</td></tr>
+        <tr><td><strong>remote-md5</strong></td><td>Agent runs <code>md5sum</code> on remote HPC in-session</td><td>Low (self-reported)</td><td><code>ssh host md5sum</code>; unreachable → <code>unknown</code></td></tr>
+      </tbody>
+    </table>
+    <div class="note reveal"><strong>Cascade precedence:</strong> a claim is <code>stale</code> if any grounding edge changed <em>or</em> any <code>depends_on</code> is stale; else <code>unknown</code> if any edge is unknown; else <code>fresh</code>. <strong>Stale wins over unknown.</strong> Traversal is cycle-safe.</div>
+  </section>
+
+  <section>
+    <h2>07 · Scope — the discipline line</h2>
+    <div class="h2sub">Build the smallest thing that honors the hard rules</div>
+    <div class="scope">
+      <div class="col yes reveal">
+        <h3>✓ v1 builds</h3>
+        <ul>
+          <li>Claim store — files-in-git source of truth</li>
+          <li>CLI — sole writer + derived SQLite index</li>
+          <li>The skill — 4-touchpoint agent protocol</li>
+          <li>Publish — immutable snapshot + diff + head.json</li>
+          <li>React/vinext read-only site, bundled per snapshot</li>
+          <li>Demo fixture + end-to-end acceptance script</li>
+        </ul>
+      </div>
+      <div class="col no reveal">
+        <h3>✕ v1 reserves the seam, builds none of it</h3>
+        <ul>
+          <li>Verification machinery (verifiers / oracles) — v2</li>
+          <li>Meeting layer — integrates <code>meeting-ai</code> in v2</li>
+          <li>Claude Code hooks — v2 hardening</li>
+          <li>Live sync, auth, accounts, real-time anything</li>
+          <li>Collaborator write-back of verdicts — v2</li>
+          <li>External-source drift monitoring — cut</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>08 · How I'll build it</h2>
+    <div class="h2sub">One orchestrated workflow, with verification gates</div>
+    <div class="grid">
+      <div class="card reveal"><span class="num">PHASE 1</span><h3>Scaffold + contracts</h3><p>Pin <code>docs/CONTRACTS.md</code> + <code>src/types.ts</code>: claim format, store layout, head.json/diff.json/snapshot schemas, CLI signatures, promotion semantics. Everything downstream codes against this.</p></div>
+      <div class="card reveal"><span class="num">PHASE 2</span><h3>Three parallel tracks</h3><p>Core library + CLI · the vinext React site · the skill. Independent, built concurrently against the frozen contracts.</p></div>
+      <div class="card reveal"><span class="num">PHASE 3</span><h3>Integrate</h3><p>Wire publish→site bundling, build the demo fixture, write the full-loop acceptance script (add 3 claims → publish → mutate artifact → refresh → re-publish → assert staleness + immutability + diff).</p></div>
+      <div class="card reveal"><span class="num">PHASE 4–5</span><h3>Verify &amp; fix</h3><p>Independent functional verify + code review + browser site QA in parallel; fix blocking findings; re-verify (≤2 rounds). The three BUILD-BRIEF failure conditions must be proven impossible.</p></div>
+    </div>
+    <div class="note reveal"><strong>Failure conditions that must stay impossible:</strong> an ungrounded claim reaching canonical · freshness stored as a column · artifacts copied into the store · a claim that can't reach ground getting published.</div>
+  </section>
+
+</main>
+
+<footer class="wrap">
+  Cairn v1 architecture plan · generated 2026-06-10 · authoritative sources: <code>CONTEXT.md</code>, <code>docs/adr/0001–0003</code>, <code>docs/BUILD-BRIEF.md</code>. Where they differ, the ADRs and CONTEXT win.
+</footer>
+</body>
+</html>
