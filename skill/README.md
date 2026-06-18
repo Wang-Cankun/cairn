@@ -1,18 +1,18 @@
 # skill/
 
 The Cairn **Skill** — the Agent's Cairn protocol (markdown capability injection for Claude
-Code). It is v1's ONLY authoring driver (Claude Code hooks are v2). The skill itself lives in
+Code). It is the Agent's authoring driver. The skill itself lives in
 `cairn/SKILL.md`; it teaches the Agent four touchpoints, each a single CLI call:
 
 1. **Orient** (session start) — `cairn head`: read canonical state + pending drafts before acting.
-2. **Author** (on concluding) — `cairn add-claim --text "…" --evidence <kind>:<ref>`: one cheap,
-   in-flow call. Draft-soft; ground a moment later with `cairn ground`. Capture NOW, never defer.
+2. **Author** (on concluding) — `cairn add-claim --text "…" --estimand <id> --evidence <kind>:<ref>`:
+   one cheap, in-flow call. Draft-soft. Capture NOW, never defer.
 3. **Refresh** (after a rerun / `tar_make()`) — `cairn refresh`: recompute freshness, surface
    newly-stale claims.
 4. **Publish** (before sharing) — `cairn validate` then `cairn publish`; relay the warn-only
    reconcile honestly.
 
-CLI verb signatures are pinned in `docs/CONTRACTS.md`.
+The full verb set and the model are in the [README](../README.md) and the [ADRs](../docs/adr/).
 
 ## Install (symlink into your Claude Code skills)
 
