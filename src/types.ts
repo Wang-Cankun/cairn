@@ -1,172 +1,440 @@
 /**
- * Cairn v1 — pinned shared contracts.
+ * Cairn v2 — pinned shared contracts (OKF deterministic anti-laundering substrate).
  *
- * This file is the SINGLE TYPESCRIPT SOURCE OF TRUTH for cross-module shapes. The three
- * parallel builders (CLI/core, site, skill) code against these types. The prose companion is
- * `docs/CONTRACTS.md`; keep the two in sync — if they ever disagree, fix both, do not fork.
+ * This file is the SINGLE TYPESCRIPT SOURCE OF TRUTH for cross-module shapes. Every other module
+ * (claimfile, store, gates, fingerprint, freshness, snapshot, publish, cli, skill) conforms to
+ * these types. If a builder disagrees with this file, the builder is wrong.
  *
- * Hard rules encoded here (do not "fix" away):
- *  - Claim files in git are the source of truth; SQLite is a derived, throwaway index.
- *  - Freshness is COMPUTED at read time from evidence fingerprints — there is deliberately
- *    NO freshness field on ClaimFile. `Freshness` appears only on read-time/published shapes.
- *  - Published head.json + snapshots contain CANONICAL CLAIMS ONLY (decision A). Drafts live
- *    only in the LOCAL terminal projection (`LocalHeadView`), never in a shared artifact.
- *  - Snapshot id = short content hash of the published VIEW: the canonical claim SET INCLUDING
- *    each claim's COMPUTED freshness {state, tier}, EXCLUDING all wall-clock timestamps
- *    (decision E + Option X). See SNAPSHOT_ID_FIELDS for the exact reproducible inputs.
+ * The foundational invariant (ADR-0004): the CLI enforces CONSISTENCY WITH WHAT WAS DECLARED,
+ * never TRUTH OF THE DECLARATION. Two kinds of fields exist on every concept node:
+ *
+ *   AGENT-ASSERTED  — what the Agent knows while analysing. Stored verbatim, never overridden.
+ *                     (text, estimand id-ref, evidence_lines, depends_on_fork, contradicts,
+ *                      inherits_caveat, provenance, deflation_route, and the markdown body.)
+ *
+ *   CLI-COMPUTED / LOCKED — a "trust badge". The Agent may SUPPLY a value; the CLI DISCARDS it
+ *                     and writes its own computed value on every write (trust-field lock, ADR-0004
+ *                     / PRD story 25). An agent can never self-stamp a trust badge.
+ *                     (id, asserter, reviewed_by, corroboration, fingerprints, freshness,
+ *                      reach_ground, lifecycle, resolution, verification.)
+ *
+ * Other hard rules encoded here (do not "fix" away):
+ *  - Concept-node files in the OKF bundle are the source of truth; SQLite is a derived, throwaway
+ *    index (ADR-0003). Freshness is COMPUTED at read time and CASCADES over dependency edges
+ *    (ADR-0002) — it is locked onto a written shape only by the CLI, never hand-set.
+ *  - Estimands are compared by id STRING-EQUALITY only; the CLI never reads an estimand body for
+ *    meaning (ADR-0005). There is NO E/N/U / equivalence-type field anywhere — that is a lens that
+ *    lives in the body narrative and in the Skill axioms, not in this schema.
+ *  - Verification is TERRITORY-LOCKED (ADR-0006 Gate A): agent-sourced provenance can never reach
+ *    `verified`. Corroboration is a SEPARATE axis, DERIVED from distinct reviewer ids (Gate B),
+ *    never a rung on verification, never hand-set.
+ *  - Handle vs body: frontmatter holds machine-actionable handles (ids, refs, enums, flags); the
+ *    body holds natural-language meaning. The CLI acts on the handle; it never parses the body.
  */
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Enums / unions
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// 0. Identity / discriminator
+// ══════════════════════════════════════════════════════════════════════════════
 
-/** Claim lifecycle state as stored on disk. Only these two exist in claim files (ADR-0001).
- *  `canonical-candidate` is an INTERNAL, in-memory validate/publish state — never written. */
-export type ClaimStatus = "draft" | "canonical";
+/** The OKF node-type discriminator carried in every concept file's frontmatter. */
+export type NodeType = "claim" | "estimand" | "confound";
 
-/** Verification axis. v1 stores the honest default "unverified" only; machinery is v2. */
-export type Verification =
-  | "unverified"
-  | "verified"
-  | "contradicted"
-  | "unverifiable";
-
-/** What a grounding edge points at. */
-export type EvidenceKind = "target" | "file" | "data" | "external";
-
-/** How a grounding edge's fingerprint was/should-be computed. Maps to a tier (see Tier). */
-export type FingerprintMethod =
-  | "pipeline-meta" // read a pipeline tool's meta store (e.g. targets _targets/meta/meta `data` col)
-  | "sha256" // hash the local file at `location`
-  | "size-mtime" // weak local fallback: size+mtime signature
-  | "remote-md5"; // ssh md5sum on a remote host; unreachable -> unknown
-
-/** Computed freshness state (ADR-0002). NEVER stored in a claim file. */
-export type FreshnessState = "fresh" | "stale" | "unknown";
+/** A claim id. Shape: `clm-<short-hash>` (content-addressed at mint, collision-extended). */
+export type ClaimId = string;
+/** An estimand id. Shape: `est-<short-hash>`. */
+export type EstimandId = string;
+/** A confound id. Shape: `cfd-<short-hash>`. */
+export type ConfoundId = string;
 
 /**
- * Fingerprint quality tier, shown on the badge. Derived from FingerprintMethod:
- *   pipeline-meta -> "pipeline"  (top: rigorous, free)
- *   sha256        -> "content"   (mid: direct content hash)
- *   size-mtime    -> "weak"      (low: heuristic, not content)
- *   remote-md5    -> "remote"    (self-reported on remote host)
- * Never flatten an unknown into fresh; the tier travels with the badge.
+ * An asserter identity. PINNED: the asserter-id IS the `who` string (a stable human/model/agent
+ * label). Two writes are "same asserter" iff their `who` strings are byte-equal. The CLI never
+ * judges whether two distinct `who` ids are genuinely independent (ADR-0006 ceiling).
  */
-export type Tier = "pipeline" | "content" | "weak" | "remote";
+export type AsserterId = string;
 
-// ──────────────────────────────────────────────────────────────────────────────
-// On-disk claim file (SOURCE OF TRUTH)
-// ──────────────────────────────────────────────────────────────────────────────
+/** Id-prefix table (the only place the prefixes are pinned). */
+export const ID_PREFIX = {
+  claim: "clm-",
+  estimand: "est-",
+  confound: "cfd-",
+} as const satisfies Record<NodeType, string>;
+
+/** Length (hex chars) of the short content hash inside a minted node id (before collision-ext). */
+export const NODE_ID_HASH_LEN = 12;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 1. Evidence refs & fingerprints (the grounding-edge carriers)
+// ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * A single claim -> evidence grounding edge.
- * `ref` is the logical handle (target name, relative file path, dataset id, external URL/DOI).
- * `location` is the concrete place to re-fingerprint from. For kind:file it usually equals ref;
- * for kind:target it is the pipeline meta store. Paths are RELATIVE TO THE HOST PROJECT ROOT
- * (the dir containing `cairn/`), never to cwd, so re-fingerprinting is location-independent
- * (decision D).
+ * An evidence ref kind, as declared by the Agent on an evidence line.
+ *   file:<path>      — a host-root-relative file; fingerprinted by content/size-mtime.
+ *   external:<uri>   — an unreachable-by-default artifact (URL/DOI); contributes `unknown` freshness.
+ *   dvc:<path.dvc>   — a DVC pointer; the `.dvc` md5 is read as the TOP fingerprint tier.
  */
-export interface GroundingEdge {
+export type EvidenceKind = "file" | "external" | "dvc";
+
+/**
+ * A single artifact reference inside a named evidence line. `kind` is the declared class; `ref` is
+ * the logical handle (a host-root-relative path for `file`/`dvc`, a URI for `external`).
+ */
+export interface EvidenceRef {
   kind: EvidenceKind;
   ref: string;
-  fingerprint: string; // stamped at authoring; "unknown" allowed only when unreachable at stamp time
-  method: FingerprintMethod;
-  location: string; // host-root-relative path or meta-store handle
 }
-
-/** A claim -> claim dependency edge is just the target claim id (string). Does NOT ground. */
-export type ClaimId = string; // shape: claim-YYYYMMDD-NNN
 
 /**
- * The parsed YAML frontmatter of a claim file. The markdown BODY (freeform notes / caveats) is
- * intentionally NOT represented here — it is unparsed in v1 (carried separately as `body`).
- *
- * NOTE the absence of any freshness field. That is load-bearing (ADR-0002), not an omission.
+ * The fingerprint tier, ordered TOP -> WEAK (ADR-0002 / ADR-0003).
+ *   dvc-md5       — read from a `.dvc` pointer's md5 (top: rigorous, versioned).
+ *   targets-hash  — read from a pipeline meta store (e.g. {targets} _targets/meta).
+ *   content-hash  — sha256 of local file bytes.
+ *   size-mtime    — weak local fallback: size + mtime signature.
+ *   unknown       — unreachable at stamp/refresh time (e.g. external:, offline remote).
+ * Never flatten `unknown` into a real tier; the tier travels with the fingerprint.
  */
-export interface ClaimFrontmatter {
-  id: ClaimId; // claim-YYYYMMDD-NNN
-  text: string; // the conclusion, one sentence
-  status: ClaimStatus; // draft | canonical
-  verification: Verification; // v1: always "unverified" on author
-  grounding: GroundingEdge[]; // >=1 required to leave draft / reach canonical
-  depends_on: ClaimId[]; // claim->claim edges; do NOT count as grounding
-  created_at: string; // ISO-8601 with offset, e.g. 2026-06-10T20:00:00-04:00
+export type FingerprintTier =
+  | "dvc-md5"
+  | "targets-hash"
+  | "content-hash"
+  | "size-mtime"
+  | "unknown";
+
+/**
+ * A stamped fingerprint of one evidence ref. CLI-COMPUTED: written by the CLI from the claim's
+ * `evidence_lines` at author/refresh, and re-read on `refresh`. `value` is null when the tier is
+ * `unknown` (unreachable). `taken_at` records when it was last computed.
+ */
+export interface Fingerprint {
+  ref: string; // the EvidenceRef.ref this fingerprint is of
+  tier: FingerprintTier;
+  value: string | null; // null iff tier === "unknown"
+  taken_at: string; // ISO-8601
 }
 
-/** A claim file as loaded from disk: parsed frontmatter + raw unparsed markdown body. */
+/** Computed freshness state (ADR-0002). CLI-LOCKED; never hand-set. */
+export type FreshnessState = "fresh" | "stale" | "unknown";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 2. Asserter / review (SEPIO asserting-agent stamps)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The asserting-agent stamp. CLI-COMPUTED: stamped on create and on every modify. Identity is the
+ * `who` string (see AsserterId). A modify whose stamped `who` differs from the existing node's
+ * `asserter.who` creates a VERSION (log.md entry + preserved prior), never a silent overwrite
+ * (PRD story 18).
+ */
+export interface Asserter {
+  who: AsserterId; // stable asserter-id; identity is byte-equality of this string
+  model: string; // model label, e.g. "claude-opus-4-8"
+  session: string; // orchestrator-supplied session id
+  time: string; // ISO-8601
+}
+
+/**
+ * One appended review edge. CLI-COMPUTED (appended by the `review` verb; set semantics, distinct by
+ * `asserter`). `note` carries the independence narrative the CLI CARRIES but DOES NOT VERIFY
+ * (ADR-0006 ceiling).
+ */
+export interface ReviewEdge {
+  asserter: AsserterId; // the reviewer's asserter-id
+  time: string; // ISO-8601
+  note?: string; // independence narrative; carried, never verified
+}
+
+/**
+ * Corroboration axis (ADR-0006 Gate B). DERIVED, never hand-set:
+ *   `cross-reviewed` iff `reviewed_by` contains >=2 distinct asserter-ids, EACH distinct from the
+ *   node's own `asserter.who`; else `self-asserted`. Corroboration is a SEPARATE axis, never a rung
+ *   on verification (a rung would read "half-verified" — forbidden masquerade).
+ */
+export type Corroboration = "self-asserted" | "cross-reviewed";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. Claim agent-asserted handle fields
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Source class of a claim (AGENT-ASSERTED). Drives the verification territory-lock (ADR-0006
+ * Gate A): only `experimental` and `human_reviewed` are TERRITORY (independent wet-lab/cohort)
+ * confirmation and may reach `verified`. `ai_proposed` AND `literature` are agent-sourced for the
+ * gate and can never reach `verified` (a citation is not confirmation of THIS analysis).
+ */
+export type Provenance = "ai_proposed" | "human_reviewed" | "literature" | "experimental";
+
+/**
+ * The set of provenances treated as AGENT-SOURCED by Gate A (cannot reach `verified`). PINNED:
+ * `literature` is included here (ADR-0006). The complement — provenances that MAY reach `verified` —
+ * is {experimental, human_reviewed}.
+ */
+export const AGENT_SOURCED_PROVENANCE: readonly Provenance[] = ["ai_proposed", "literature"] as const;
+
+/**
+ * A named line of evidence with one or more artifact refs (AGENT-ASSERTED). This is the grounding-
+ * edge carrier: a claim reaches ground when an evidence line's refs terminate at evidence (any kind
+ * counts as ground; `external:` is reachable-as-ground but contributes `unknown` freshness).
+ */
+export interface EvidenceLine {
+  name: string; // human-named line, e.g. "DE on log-CPM"
+  refs: EvidenceRef[]; // >=1 in practice; carried verbatim
+}
+
+/**
+ * A declared fork the claim is conditional on (AGENT-ASSERTED). PINNED grammar: `axis=choice` —
+ * `axis` and `choice` are non-empty, split on the FIRST `=` only (so `choice` may contain `=`); no
+ * spaces around the separator. The CLI does not interpret whether the fork is arbitrary.
+ */
+export interface ForkChoice {
+  axis: string; // non-empty
+  choice: string; // non-empty; may itself contain `=`
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 4. Claim CLI-computed / locked enum axes
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Lifecycle axis (ADR-0001). CLI-LOCKED, set by promotion. `draft` is the soft pre-gate state;
+ * `canonical` only after the reach-ground gate passes. Drafts are NEVER emitted into index.md or
+ * any snapshot bundle.
+ */
+export type Lifecycle = "draft" | "canonical";
+
+/**
+ * Resolution axis (ADR-0001 extension) — orthogonal to lifecycle. CLI-LOCKED. `settled` is refused
+ * while any `contradicts` edge is unresolved; a contested claim may remain `canonical` but stay
+ * `open`. This is the structural block on the NK CLOSED-NEGATIVE recurrence. Default `open`.
+ */
+export type Resolution = "open" | "settled";
+
+/**
+ * Verification axis (ADR-0006 Gate A). CLI-LOCKED & territory-locked. Default `unverified` — the
+ * inheritable warning light. The CLI refuses `verified` for agent-sourced provenance.
+ */
+export type Verification = "unverified" | "verified" | "contradicted" | "unverifiable";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 5. The claim handle (frontmatter) — asserted + locked, fully discriminated
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A claim's full frontmatter handle: AGENT-ASSERTED fields (carried verbatim) + CLI-COMPUTED/LOCKED
+ * fields (overridden on every write). See the field-ownership table in CONTRACT for who owns what.
+ *
+ * The markdown BODY is carried separately on ClaimFile, not here (handle vs body separation). No
+ * frontmatter value is duplicated verbatim in the body (scan-cheap / drill-deep, PRD story 31).
+ */
+export interface ClaimFrontmatter {
+  // — discriminator —
+  type: "claim";
+
+  // ───────────────────────────── AGENT-ASSERTED ─────────────────────────────
+  /** One-line conclusion stated with its conditions. The machine-actionable summary. */
+  text: string;
+  /**
+   * Single estimand id-ref (AGENT-ASSERTED). Compared by string-equality only (ADR-0005). May be
+   * absent on a `draft`; required to pass the gate to `canonical`.
+   */
+  estimand?: EstimandId;
+  /** Named evidence lines; each line carries >=1 artifact ref. The grounding-edge carrier. */
+  evidence_lines: EvidenceLine[];
+  /** Fork(s) the claim is conditional on. Declarative; the CLI does not interpret them. */
+  depends_on_fork: ForkChoice[];
+  /** Structural record of disagreement — claim ids this claim contradicts. Drives gate c.3. */
+  contradicts: ClaimId[];
+  /** Unerasable caveats inherited BY REFERENCE (confound ids). Propagation is a graph edge. */
+  inherits_caveat: ConfoundId[];
+  /** Source class of the claim. Drives the verification territory-lock (Gate A). */
+  provenance: Provenance;
+  /**
+   * Free-narrative pointer to what would shrink the residual uncertainty (PRD story 9). PINNED:
+   * free narrative, NO controlled vocabulary. The Agent MAY prefix a convention token
+   * ({clarify-estimand, more-validation, redo-experiment}) but the CLI enforces none.
+   */
+  deflation_route?: string;
+
+  // ──────────────────────────── CLI-COMPUTED / LOCKED ────────────────────────
+  /** Stable claim id (`clm-<hash>`). Minted by the CLI at add-claim; immutable. */
+  id: ClaimId;
+  /** Asserting-agent stamp; stamped on create and every modify. */
+  asserter: Asserter;
+  /** Appended review edges; set semantics, distinct by asserter-id. */
+  reviewed_by: ReviewEdge[];
+  /** Derived corroboration (Gate B); never hand-set. */
+  corroboration: Corroboration;
+  /** Stamped fingerprints, one per evidence ref, computed at author/refresh. */
+  fingerprints: Fingerprint[];
+  /** Derived freshness (ADR-0002); cascades over dependency edges. Never hand-set. */
+  freshness: FreshnessState;
+  /** Derived reach-ground (ADR-0001); recursive query. Never hand-set. */
+  reach_ground: boolean;
+  /** Lifecycle, set by promotion. */
+  lifecycle: Lifecycle;
+  /** Resolution axis, orthogonal to lifecycle. Default `open`. */
+  resolution: Resolution;
+  /** Verification, territory-locked. Default `unverified`. */
+  verification: Verification;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 6. Estimand & confound handles (minimal; meaning lives in the body)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The estimand handle (ADR-0005). MINIMAL by design. NO E/N/U field, no equivalence-type field.
+ * The body IS the meaning (the natural-language statement of which quantity/question). The CLI
+ * compares estimands by `id` string-equality ONLY; it never reads the body.
+ */
+export interface EstimandFrontmatter {
+  type: "estimand";
+  /** Stable estimand id (`est-<hash>`). CLI-minted; immutable. */
+  id: EstimandId;
+  /** Asserting-agent stamp. CLI-COMPUTED. */
+  asserter: Asserter;
+  /** Optional short human-scanning label (AGENT-ASSERTED, free string). */
+  label?: string;
+}
+
+/**
+ * The confound handle (PRD stories 7-8). The body IS the unerasable caveat (the design confound in
+ * prose). Claims reference it via `inherits_caveat: [<id>]`; propagation is a graph edge with one
+ * source of truth.
+ */
+export interface ConfoundFrontmatter {
+  type: "confound";
+  /** Stable confound id (`cfd-<hash>`). CLI-minted; immutable. */
+  id: ConfoundId;
+  /** Whether the caveat is unerasable (AGENT-ASSERTED; default true, PINNED). */
+  unerasable: boolean;
+  /** Asserting-agent stamp. CLI-COMPUTED. */
+  asserter: Asserter;
+  /** Optional short human-scanning label (AGENT-ASSERTED, free string). */
+  label?: string;
+}
+
+/** Discriminated union over the three OKF node frontmatters (by `type`). */
+export type NodeFrontmatter = ClaimFrontmatter | EstimandFrontmatter | ConfoundFrontmatter;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 7. On-disk node files (frontmatter handle + markdown body)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A claim file as loaded from disk: parsed frontmatter handle + raw markdown body. The body, per
+ * a.3, contains three prose movements (conclusion-with-conditions; the contradiction & caveat
+ * explained; what would change it). The CLI carries the body but does not parse it for meaning.
+ */
 export interface ClaimFile {
   frontmatter: ClaimFrontmatter;
-  body: string; // freeform notes; never parsed in v1
+  body: string;
   path: string; // absolute path to the .md file (runtime convenience; not serialized)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Computed read-time shapes
-// ──────────────────────────────────────────────────────────────────────────────
-
-/** Per-claim computed freshness, with the tier that produced it. */
-export interface Freshness {
-  state: FreshnessState;
-  tier: Tier; // BEST tier among grounding edges (TIER_ORDER / bestTier; see CONTRACTS.md rule)
-  as_of: string; // ISO timestamp this freshness was computed (publish time for published head)
+/** An estimand file: handle + body (the definition). */
+export interface EstimandFile {
+  frontmatter: EstimandFrontmatter;
+  body: string; // THE definition — the natural-language statement of the quantity/question
+  path: string;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// PUBLISHED head.json — CANONICAL ONLY (decision A). Shared artifact.
-// ──────────────────────────────────────────────────────────────────────────────
+/** A confound file: handle + body (the unerasable caveat). */
+export interface ConfoundFile {
+  frontmatter: ConfoundFrontmatter;
+  body: string; // THE caveat — the design confound in prose
+  path: string;
+}
 
-/** A canonical claim as it appears in the PUBLISHED head.json (no drafts, no body, no status). */
+/** Discriminated union over the three OKF node files. */
+export type NodeFile = ClaimFile | EstimandFile | ConfoundFile;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 8. Computed read-time / published projections
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A canonical claim as it appears on the orient surface (`index.md`) and in a snapshot bundle. This
+ * is the published VIEW: locked axes + live-recomputed freshness, no draft, no version history. The
+ * body is rendered alongside by the OKF visualizer, not carried here.
+ */
 export interface PublishedClaim {
   id: ClaimId;
   text: string;
+  estimand: EstimandId | null; // null only if somehow absent (gate forbids on canonical)
+  provenance: Provenance;
   verification: Verification;
-  freshness: Freshness; // frozen-at-publish (decision C); site labels it "as of as_of"
-  grounding: GroundingEdge[];
-  depends_on: ClaimId[];
+  corroboration: Corroboration;
+  resolution: Resolution;
+  freshness: FreshnessState; // recomputed at emit
+  reach_ground: boolean;
+  evidence_lines: EvidenceLine[];
+  depends_on_fork: ForkChoice[];
+  contradicts: ClaimId[];
+  inherits_caveat: ConfoundId[];
 }
 
-/** Snapshot lineage recorded inside head.json. */
-export interface SnapshotLineage {
-  current: string; // this snapshot id (content hash, decision E)
-  previous: string | null; // prior snapshot id, or null for the first publish
-}
-
-/**
- * The PUBLISHED head.json. Canonical claims ONLY — NOT even a draft count (decision A).
- * Written to: snapshots/<id>/data/head.json AND mirrored at published/latest/data/head.json.
- * Consumed by: the static site bundle AND a fresh agent session (orient from this alone).
- */
-export interface PublishedHead {
-  schema: "cairn.head/1";
-  snapshot: SnapshotLineage;
-  published_at: string; // ISO; the "as of" the site stamps on every badge
-  claims: PublishedClaim[]; // canonical only, stable-sorted by id
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// LOCAL terminal projection — canonical + drafts (decision A). NEVER serialized to a share.
-// ──────────────────────────────────────────────────────────────────────────────
-
-/** A pending draft as shown in LOCAL `cairn head` / `cairn drafts` terminal output only. */
+/** A draft as surfaced by `drafts` / `status` (ungrounded threads visible, not silently rotting). */
 export interface DraftView {
   id: ClaimId;
   text: string;
-  grounded: boolean; // has >=1 grounding edge (candidate) vs zero (not a candidate)
+  reach_ground: boolean; // does it reach ground yet (promotion candidacy)
+  estimand: EstimandId | null;
 }
 
 /**
- * The LOCAL orient view printed to the terminal by `cairn head`. Includes pending drafts.
- * This object is terminal output / in-memory only — it is NEVER written into head.json or any
- * shared artifact. The published projection (PublishedHead) is the canonical-only counterpart.
+ * A surfaced unresolved contradiction for the orient surface. `index.md` MUST surface these
+ * prominently, never bury them under canonical positives (PRD stories 10-11; ADR-0004).
  */
-export interface LocalHeadView {
-  canonical: PublishedClaim[]; // same per-claim shape, freshness computed live (as_of = now)
-  drafts: DraftView[]; // pending drafts, including ungrounded ones
+export interface SurfacedContradiction {
+  claim: ClaimId; // the claim carrying the contradicts edge
+  contradicts: ClaimId; // the claim it disagrees with
+  estimand: EstimandId | null; // the shared estimand id (siblings) if any
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// diff.json — vs previous snapshot. Shared artifact (snapshots/<id>/data/diff.json).
-// ──────────────────────────────────────────────────────────────────────────────
+/**
+ * The orient surface emitted by `head` into `index.md`: canonical claims with live freshness, with
+ * unresolved contradictions and staleness surfaced. This is the session-start orient read.
+ */
+export interface OrientSurface {
+  canonical: PublishedClaim[]; // canonical only, stable-sorted by id
+  contradictions: SurfacedContradiction[]; // unresolved, surfaced prominently
+  stale: ClaimId[]; // canonical claims whose freshness is stale|unknown
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 9. Snapshot identity & diff (the time spine)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The EXACT, ordered inputs hashed to produce a snapshot id. Hash the published VIEW of the
+ * canonical set INCLUDING each claim's locked axes and COMPUTED freshness state, while EXCLUDING all
+ * wall-clock timestamps (taken_at, asserter.time, etc.), so the same published view is
+ * byte-reproducible AND an artifact mutation (-> refresh) yields a NEW id. Arrays are SORTED before
+ * hashing (claims by id; evidence/contradicts/caveats/forks canonically ordered). The id is a SHORT
+ * prefix of sha256 over the canonical JSON of this structure.
+ */
+export interface SnapshotIdInput {
+  claims: Array<{
+    id: ClaimId;
+    text: string;
+    type: "claim";
+    estimand: EstimandId | null;
+    provenance: Provenance;
+    verification: Verification;
+    corroboration: Corroboration;
+    resolution: Resolution;
+    lifecycle: "canonical"; // only canonical claims enter the id
+    freshness: FreshnessState; // computed; NO timestamp
+    reach_ground: boolean;
+    evidence_lines: EvidenceLine[]; // sorted
+    depends_on_fork: ForkChoice[]; // sorted
+    contradicts: ClaimId[]; // sorted
+    inherits_caveat: ConfoundId[]; // sorted
+  }>;
+}
+
+/** Length (hex chars) of a snapshot id (a content-addressed snapshots/<hash>/ directory name). */
+export const SNAPSHOT_ID_LEN = 16;
 
 /** A claim whose text changed between snapshots. */
 export interface TextChange {
@@ -189,101 +457,94 @@ export interface VerificationChange {
   after: Verification;
 }
 
+/** A claim whose resolution changed between snapshots (the contested-claim time signal). */
+export interface ResolutionChange {
+  id: ClaimId;
+  before: Resolution;
+  after: Resolution;
+}
+
 export interface DiffCounts {
   added: number;
   removed: number;
   text_changed: number;
   freshness_changed: number;
   verification_changed: number;
+  resolution_changed: number;
 }
 
-/**
- * The diff of THIS snapshot vs its previous one. `against` is the previous snapshot id (null on
- * the first publish, in which case every canonical claim is `added`).
- */
+/** The diff of THIS snapshot vs its previous one (appended to log.md per publish). */
 export interface SnapshotDiff {
-  schema: "cairn.diff/1";
-  against: string | null; // previous snapshot id
-  added: PublishedClaim[]; // present now, absent before
-  removed: ClaimId[]; // present before, absent now (ids only)
+  against: string | null; // previous snapshot id; null on first publish
+  added: PublishedClaim[];
+  removed: ClaimId[];
   text_changed: TextChange[];
   freshness_changed: FreshnessChange[];
   verification_changed: VerificationChange[];
+  resolution_changed: ResolutionChange[];
   counts: DiffCounts;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Snapshot id — reproducible content hash (decision E)
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// 10. Gates — shared result shape
+// ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * The EXACT, ordered inputs hashed to produce a snapshot id. Hash the published VIEW: the canonical
- * claim SET INCLUDING each claim's COMPUTED freshness {state, tier} (Option X), while EXCLUDING all
- * wall-clock timestamps (as_of, published_at, created_at, generated_at), so the same published view
- * is byte-reproducible AND a freshness-only change (artifact mutated -> refresh) yields a NEW id.
- * Each grounding entry contributes (kind, ref, fingerprint, method, location); arrays are SORTED
- * before hashing (grounding by [ref,location]; depends_on lexicographically; claims by id). The id
- * is a SHORT (16 hex char) prefix of sha256 over the canonical JSON of this structure.
- *
- * NOTE: `freshness` carries {state, tier} ONLY — the `as_of` timestamp is deliberately excluded
- * (semantic-free time stays out of identity; semantic state stays in).
- */
-export interface SnapshotIdInput {
-  claims: Array<{
-    id: ClaimId;
-    text: string;
-    status: "canonical"; // only canonical claims enter the id
-    verification: Verification;
-    freshness: { state: FreshnessState; tier: Tier }; // computed at publish; NO timestamp
-    grounding: Array<Pick<GroundingEdge, "kind" | "ref" | "fingerprint" | "method" | "location">>;
-    depends_on: ClaimId[]; // sorted
-  }>;
+/** The gate ids (each maps to a deterministic rule in section (c) of the spec). */
+export type GateId =
+  | "reach-ground" // c.1, ADR-0001
+  | "estimand-collapse" // c.2, ADR-0005
+  | "resolution" // c.3, ADR-0001 extension
+  | "verification-lock" // c.4, ADR-0006 Gate A
+  | "corroboration" // c.5, ADR-0006 Gate B
+  | "trust-field-lock"; // c.6, ADR-0004 (meta-gate)
+
+/** One gate violation: which gate, which offending node/edge, and a human message. */
+export interface GateViolation {
+  gate: GateId;
+  claim: ClaimId; // the offending claim id (or the source of an offending edge)
+  detail?: string; // e.g. the contradicting id, the differing estimand id
+  message: string;
 }
 
-/** Field-order contract for the per-claim hash input (documentation/assertion aid). */
-export const SNAPSHOT_ID_FIELDS = [
-  "id",
-  "text",
-  "status",
-  "verification",
-  "freshness", // {state, tier} ONLY — computed at publish; the `as_of` timestamp is EXCLUDED
-  "grounding", // each: kind, ref, fingerprint, method, location  (sorted by [ref, location])
-  "depends_on", // sorted lexicographically
-] as const;
+/** The result of running gates over a candidate set. `ok` iff no violations. Read-only. */
+export interface GateResult {
+  ok: boolean;
+  violations: GateViolation[];
+  candidateIds: ClaimId[]; // claims that WOULD be promoted on pass (grounded drafts + canonical)
+}
 
-/** Length (hex chars) of a snapshot id. */
-export const SNAPSHOT_ID_LEN = 16;
-
-// ──────────────────────────────────────────────────────────────────────────────
-// config.json (optional, host-side)
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// 11. Config & store paths (host-side runtime)
+// ══════════════════════════════════════════════════════════════════════════════
 
 /** Optional cairn/config.json. Absent => all fields default; reconcile reports "not configured". */
 export interface CairnConfig {
   /** Globs (host-root-relative) of shared findings/paper files to scan in warn-only reconcile. */
   findings_globs?: string[];
-  /** Optional remote host alias for remote-md5 re-fingerprinting (ssh config name). */
+  /** Optional remote host alias for remote fingerprinting of dvc/remote refs (ssh config name). */
   remote_host?: string;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Store discovery (runtime)
-// ──────────────────────────────────────────────────────────────────────────────
-
-/** Resolved Cairn store paths after walking up from cwd to find `cairn/` with `claims/`. */
+/**
+ * Resolved Cairn OKF store paths after walking up from cwd to find the bundle. The bundle is a
+ * self-contained text-only OKF directory (ADR-0003): claims/ estimands/ confounds/ + index.md,
+ * log.md, snapshots/. The derived SQLite index is NOT part of the portable bundle.
+ */
 export interface StorePaths {
-  hostRoot: string; // dir CONTAINING cairn/ — the root all evidence paths are relative to (decision D)
+  hostRoot: string; // dir CONTAINING the store — root all evidence paths are relative to
   storeDir: string; // <hostRoot>/cairn
   claimsDir: string; // <hostRoot>/cairn/claims
+  estimandsDir: string; // <hostRoot>/cairn/estimands
+  confoundsDir: string; // <hostRoot>/cairn/confounds
   snapshotsDir: string; // <hostRoot>/cairn/snapshots
-  publishedLatestDir: string; // <hostRoot>/cairn/published/latest  (stable share link, decision B)
-  headJsonPath: string; // <hostRoot>/cairn/head.json
+  indexPath: string; // <hostRoot>/cairn/index.md   (orient surface emitted by `head`)
+  logPath: string; // <hostRoot>/cairn/log.md      (append-only time spine)
   configPath: string; // <hostRoot>/cairn/config.json (may not exist)
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// CLI add/ground edge spec (parsed from --evidence kind:ref)
-// ──────────────────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// 12. CLI argument shapes (parsed before stamping)
+// ══════════════════════════════════════════════════════════════════════════════
 
 /** Parsed `--evidence kind:ref` argument before fingerprint stamping. */
 export interface EvidenceArg {
@@ -291,13 +552,61 @@ export interface EvidenceArg {
   ref: string;
 }
 
-/** Maps a FingerprintMethod to its display Tier. */
-export const METHOD_TIER: Record<FingerprintMethod, Tier> = {
-  "pipeline-meta": "pipeline",
-  sha256: "content",
-  "size-mtime": "weak",
-  "remote-md5": "remote",
-};
+/** Parsed `--depends-on-fork axis=choice` argument (split on first `=`). */
+export interface ForkArg {
+  axis: string;
+  choice: string;
+}
 
-/** Tier ordering, best -> worst, for picking a claim's representative badge tier. */
-export const TIER_ORDER: Tier[] = ["pipeline", "content", "remote", "weak"];
+// ══════════════════════════════════════════════════════════════════════════════
+// 13. Constant tables (the only value-level exports)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Fingerprint tier ordering, BEST -> WORST (ADR-0002/0003). Used to pick a claim's representative
+ * tier and to compare tiers. `unknown` is strictly worst.
+ */
+export const TIER_ORDER: readonly FingerprintTier[] = [
+  "dvc-md5",
+  "targets-hash",
+  "content-hash",
+  "size-mtime",
+  "unknown",
+] as const;
+
+/** Allowed evidence-ref kinds (for `--evidence` parsing / validation). */
+export const EVIDENCE_KINDS: readonly EvidenceKind[] = ["file", "external", "dvc"] as const;
+
+/** Allowed provenance enum values (for validation). */
+export const PROVENANCES: readonly Provenance[] = [
+  "ai_proposed",
+  "human_reviewed",
+  "literature",
+  "experimental",
+] as const;
+
+/** Allowed verification enum values (for validation; the CLI still locks the value). */
+export const VERIFICATIONS: readonly Verification[] = [
+  "unverified",
+  "verified",
+  "contradicted",
+  "unverifiable",
+] as const;
+
+/** Allowed lifecycle values. */
+export const LIFECYCLES: readonly Lifecycle[] = ["draft", "canonical"] as const;
+
+/** Allowed resolution values. */
+export const RESOLUTIONS: readonly Resolution[] = ["open", "settled"] as const;
+
+/** Allowed corroboration values (CLI-derived; listed for validation/coercion). */
+export const CORROBORATIONS: readonly Corroboration[] = ["self-asserted", "cross-reviewed"] as const;
+
+/** Allowed fingerprint tiers (for validation). */
+export const FINGERPRINT_TIERS: readonly FingerprintTier[] = [
+  "dvc-md5",
+  "targets-hash",
+  "content-hash",
+  "size-mtime",
+  "unknown",
+] as const;

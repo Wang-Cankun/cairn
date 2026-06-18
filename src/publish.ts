@@ -1,225 +1,273 @@
 /**
- * publish.ts — the DATA side of `cairn publish` (CONTRACTS §§3-7, decisions A-F).
+ * publish.ts — the DATA side of `cairn publish` (spec §(d), §(e)).
+ *
+ * v2 OKF bundle freeze (ADR-0003): a publish freezes an IMMUTABLE, CONTENT-ADDRESSED, canonical-only
+ * OKF bundle into `snapshots/<snapshot-hash>/` and appends a diff entry to `log.md` (the time spine).
+ * The v1 self-invented snapshot format and bundled React site are RETIRED — a snapshot is a plain OKF
+ * bundle (claims/ estimands/ confounds/ + a frozen index.md) rendered by a standard OKF visualizer.
  *
  * Steps:
- *  1. Run the reach-ground gate over canonical + grounded-draft candidates. Block on failure.
- *  2. Promote passing grounded drafts to status:canonical (rewrite their claim files — CLI is the
- *     sole writer).
- *  3. Compute the published head (canonical only, decision A) with freshness frozen-at-publish
- *     (decision C, as_of = published_at).
- *  4. Content-hash the canonical set -> snapshot id (decision E, excludes timestamps).
- *  5. Write snapshots/<id>/data/{head.json,diff.json}; the static site assets are copied at a
- *     clearly-marked HOOK POINT (decision F — the integration pass wires the bundle source).
- *  6. Mirror the snapshot into published/latest/ (decision B, COPY) and update cairn/head.json.
+ *  1. validate — run all promotion gates (runGate). Block (PublishError) on any violation.
+ *  2. Promote passing grounded drafts to lifecycle:canonical (rewrite their files; CLI is sole writer),
+ *     re-locking every CLI-computed field on the rewrite.
+ *  3. Compute the published head (canonical only) with freshness frozen-at-publish.
+ *  4. Content-hash the canonical view → snapshot id (excludes timestamps; includes freshness state).
+ *  5. Freeze the canonical-only OKF bundle into snapshots/<id>/ (claims/estimands/confounds + index.md
+ *     + a machine head.json for diffing). Immutable: never rewrite a complete snapshot.
+ *  6. Emit the live orient surface to cairn/index.md, append a diff entry to log.md.
  *  7. Run the warn-only reconcile (never blocks).
  */
 
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { computeFreshness } from "./freshness.ts";
-import { runGate, type GateResult } from "./gate.ts";
+import { candidateSet, runGate } from "./gate.ts";
+import { deriveCorroboration, lockedResolution, lockedVerification } from "./gate.ts";
 import { reconcile, type ReconcileReport } from "./reconcile.ts";
 import {
+  buildOrientSurface,
   canonicalFrontmatter,
   computeDiff,
   computeSnapshotId,
   toPublishedClaim,
 } from "./snapshot.ts";
-import { isoNow, readAllClaims, readConfig, writeClaim } from "./store.ts";
+import { renderIndexMd } from "./render.ts";
+import { appendLog, isoNow, readAllClaims, readConfig, writeClaim } from "./store.ts";
+import { isGrounded } from "./claimfile.ts";
 import type {
   ClaimFile,
+  GateResult,
   PublishedClaim,
-  PublishedHead,
   SnapshotDiff,
   StorePaths,
 } from "./types.ts";
 
 export class PublishError extends Error {}
 
+/** A frozen snapshot's machine head, written into snapshots/<id>/head.json for lineage + diffing. */
+export interface SnapshotHead {
+  snapshot: string; // this snapshot id
+  previous: string | null; // the prior snapshot id (lineage)
+  published_at: string; // ISO-8601 (informational; NOT part of the id)
+  claims: PublishedClaim[]; // canonical-only published view
+}
+
 export interface PublishResult {
   snapshotId: string;
   previousId: string | null;
   promoted: string[]; // ids promoted draft->canonical this publish
-  head: PublishedHead;
+  head: SnapshotHead;
   diff: SnapshotDiff;
   reconcile: ReconcileReport;
   reused: boolean; // true if snapshot id already existed (no-op re-publish)
 }
 
 /**
- * Read the previous published head for lineage/diff. Source = `published/latest/data/head.json`,
- * which is written ONLY by publish — NOT the mutable convenience `cairn/head.json`, which `refresh`
- * and `head` clobber (they set snapshot.current="") and would otherwise erase publish lineage.
- * Falls back to `cairn/head.json` only if it carries a real (non-empty) snapshot id, for stores
- * predating the latest/ dir. Returns null on first publish.
+ * Resolve the previous published snapshot id from the log.md time spine. We scan log.md for the most
+ * recent `publish <id>` marker. Returns null if no prior publish is recorded.
  */
-function readPreviousHead(paths: StorePaths): PublishedHead | null {
-  const latestHead = join(paths.publishedLatestDir, "data", "head.json");
-  for (const candidate of [latestHead, paths.headJsonPath]) {
-    if (!existsSync(candidate)) continue;
-    try {
-      const h = JSON.parse(readFileSync(candidate, "utf8")) as PublishedHead;
-      if (h?.snapshot?.current) return h;
-    } catch {
-      /* try next */
-    }
+function previousSnapshotId(paths: StorePaths): string | null {
+  if (!existsSync(paths.logPath)) return null;
+  let text: string;
+  try {
+    text = readFileSync(paths.logPath, "utf8");
+  } catch {
+    return null;
   }
-  return null;
+  const ids: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^- publish\s+([0-9a-f]+)\b/);
+    if (m && m[1]) ids.push(m[1]);
+  }
+  return ids.length > 0 ? (ids[ids.length - 1] as string) : null;
+}
+
+/** Read a prior frozen snapshot's head.json (for diffing). Returns null if unreadable/absent. */
+function readSnapshotHead(paths: StorePaths, id: string): SnapshotHead | null {
+  const headPath = join(paths.snapshotsDir, id, "head.json");
+  if (!existsSync(headPath)) return null;
+  try {
+    return JSON.parse(readFileSync(headPath, "utf8")) as SnapshotHead;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Resolve the prebuilt site bundle dir (decision F). Precedence: explicit arg, then
- * CAIRN_SITE_DIST env, then the repo's own `site/dist` (resolved relative to THIS source file, so
- * it works regardless of cwd / where the host store lives). Returns null if none resolves to an
- * existing dir.
+ * Re-lock every CLI-computed field on a claim frontmatter to its derived value (trust-field lock,
+ * c.6 / ADR-0004), given the live candidate ids (for resolution) and computed freshness. This is the
+ * write-time enforcement: an agent-supplied trust badge is discarded and replaced by the computed
+ * value. `reach_ground` is the per-claim grounding-edge check; freshness comes from computeFreshness.
  */
-export function resolveSiteDist(siteDist?: string): string | null {
-  const candidates = [siteDist, process.env.CAIRN_SITE_DIST].filter(Boolean) as string[];
-  // Repo-relative default: src/publish.ts -> ../site/dist
-  const here = dirname(fileURLToPath(import.meta.url));
-  candidates.push(join(here, "..", "site", "dist"));
-  for (const c of candidates) {
-    if (existsSync(join(c, "index.html"))) return c;
-  }
-  return null;
-}
-
-/**
- * Copy the prebuilt static site bundle (decision F) into the snapshot dir. Copies `index.html`,
- * `assets/` and `fonts/` only — NOT the bundle's `data/` (those are DEV fixtures; the real
- * `data/head.json` + `data/diff.json` are written separately by publish). Caller passes a resolved
- * dist dir (see resolveSiteDist); throws PublishError if it is missing so the operator is told to
- * build the site first.
- */
-export function copySiteBundle(snapshotDir: string, dist: string | null): void {
-  if (!dist) {
-    throw new PublishError(
-      "prebuilt site bundle not found (site/dist/index.html missing). Run `bun run build:site` first.",
-    );
-  }
-  // Copy everything except data/ (dev fixtures overwritten by the real data written separately).
-  cpSync(dist, snapshotDir, {
-    recursive: true,
-    filter: (src) => {
-      const rel = src.slice(dist.length).replace(/^[/\\]/, "");
-      return rel !== "data" && !rel.startsWith("data/") && !rel.startsWith("data\\");
-    },
-  });
+function relock(
+  fm: ClaimFile["frontmatter"],
+  liveIds: ReadonlySet<string>,
+  freshness: Map<string, import("./types.ts").FreshnessState>,
+): ClaimFile["frontmatter"] {
+  return {
+    ...fm,
+    corroboration: deriveCorroboration(fm),
+    freshness: freshness.get(fm.id) ?? "unknown",
+    reach_ground: isGrounded(fm),
+    resolution: lockedResolution(fm, liveIds),
+    verification: lockedVerification(fm),
+  };
 }
 
 /**
  * Run the data side of publish against an already-resolved store. Returns a PublishResult; throws
- * PublishError (with offender ids) if the gate fails.
+ * PublishError (naming the failing gate + claim) if validate fails.
  */
-export function publish(
-  paths: StorePaths,
-  opts: { now?: Date; siteDist?: string } = {},
-): PublishResult {
+export function publish(paths: StorePaths, opts: { now?: Date } = {}): PublishResult {
   const now = opts.now ?? new Date();
   const published_at = isoNow(now);
-
-  // Resolve the prebuilt site bundle up front so we fail BEFORE mutating any files (promoting
-  // drafts, writing snapshots) if the site has not been built (decision F).
-  const dist = resolveSiteDist(opts.siteDist);
-  if (!dist) {
-    throw new PublishError(
-      "prebuilt site bundle not found (site/dist/index.html missing). Run `bun run build:site` first.",
-    );
-  }
+  const config = readConfig(paths);
 
   let claims = readAllClaims(paths);
 
-  // 1. Gate.
+  // 1. validate — all promotion gates.
   const gate: GateResult = runGate(claims);
   if (!gate.ok) {
-    throw new PublishError(
-      `reach-ground gate failed; these candidates cannot reach ground: ${gate.offenders.join(", ")}`,
-    );
+    const lines = gate.violations.map((v) => `${v.gate}/${v.claim}: ${v.message}`);
+    throw new PublishError(`validate failed (${gate.violations.length} violation(s)):\n  ${lines.join("\n  ")}`);
   }
 
-  // 2. Promote passing grounded drafts to canonical (rewrite files).
+  // 2. Promote passing grounded drafts to canonical (rewrite files), RE-LOCKING every CLI-computed
+  // field on the rewrite (trust-field lock c.6 / ADR-0004). This is the write-time override the
+  // contract describes ("override on every write"), not merely the blocking gate above: even though the
+  // gate already refused an illegal verified/cross-reviewed/settled, the promotion write still re-locks
+  // so the canonical file is the derived value, never an agent-supplied one.
+  //
+  // liveIds for the resolution lock = the candidate-canonical set (canonical + grounded drafts being
+  // promoted now); freshness is computed once here so the promotion write stamps the frozen-at-publish
+  // freshness too.
+  const preFreshness = computeFreshness(claims, paths.hostRoot, published_at, config.remote_host);
+  const { candidates } = candidateSet(claims);
+  const promoteLiveIds: ReadonlySet<string> = new Set(candidates.map((c) => c.frontmatter.id));
+
+  const promotable = new Set(gate.candidateIds);
   const promoted: string[] = [];
   for (const c of claims) {
-    if (gate.candidateIds.includes(c.frontmatter.id) && c.frontmatter.status === "draft") {
-      const fm = { ...c.frontmatter, status: "canonical" as const };
-      writeClaim(paths, fm, c.body);
-      promoted.push(fm.id);
+    if (promotable.has(c.frontmatter.id) && c.frontmatter.lifecycle === "draft") {
+      const locked = relock({ ...c.frontmatter, lifecycle: "canonical" as const }, promoteLiveIds, preFreshness);
+      writeClaim(paths, locked, c.body);
+      promoted.push(locked.id);
     }
   }
-  // Re-read so subsequent steps see promoted statuses.
   if (promoted.length > 0) claims = readAllClaims(paths);
 
   // 3. Published head: canonical only, freshness frozen at publish (as_of = published_at).
-  // Load config once: remote_host drives remote-md5 re-fingerprinting (CONTRACTS §8), reused below
-  // for the warn-only reconcile.
-  const config = readConfig(paths);
   const canonical = canonicalFrontmatter(claims);
   const freshness = computeFreshness(claims, paths.hostRoot, published_at, config.remote_host);
-  const publishedClaims: PublishedClaim[] = canonical.map((fm) => {
-    const fr = freshness.get(fm.id);
-    if (!fr) throw new PublishError(`internal: missing freshness for ${fm.id}`);
-    return toPublishedClaim(fm, fr);
-  });
+  const publishedClaims: PublishedClaim[] = canonical.map((fm) =>
+    toPublishedClaim(fm, freshness.get(fm.id) ?? "unknown"),
+  );
 
-  // 4. Snapshot id (Option X): hashes the published VIEW — canonical claims INCLUDING their
-  // computed freshness {state, tier} — while excluding all wall-clock timestamps. So a
-  // freshness-only change (artifact mutated -> refresh -> publish) yields a NEW id, while a true
-  // no-op republish (same claims, same freshness) is idempotent.
+  // 4. Snapshot id (content-addressed; excludes timestamps; includes freshness state).
   const snapshotId = computeSnapshotId(canonical, freshness);
-  // Previous lineage comes from published/latest/ (durable; refresh/head can't clobber it).
-  const previousHead = readPreviousHead(paths);
-  // Re-publishing the SAME content head (same id) is a no-op for lineage/diff: don't diff a head
-  // against itself. Treat a previous head whose id equals this id as "no previous" so `against`
-  // points at the genuinely prior DISTINCT snapshot (or null on the very first publish).
-  const effectivePrev = previousHead && previousHead.snapshot.current !== snapshotId ? previousHead : null;
-  const previousId = effectivePrev ? effectivePrev.snapshot.current : null;
 
-  const head: PublishedHead = {
-    schema: "cairn.head/1",
-    snapshot: { current: snapshotId, previous: previousId },
+  // Previous lineage from the log.md time spine; ignore a previous that equals THIS id (idempotent
+  // re-publish of identical content) so the diff points at the genuinely prior distinct snapshot.
+  const rawPrevId = previousSnapshotId(paths);
+  const previousId = rawPrevId && rawPrevId !== snapshotId ? rawPrevId : null;
+  const previousHead = previousId ? readSnapshotHead(paths, previousId) : null;
+  const diff = computeDiff(
+    publishedClaims,
+    previousHead ? { against: previousHead.snapshot, claims: previousHead.claims } : null,
+  );
+
+  const head: SnapshotHead = {
+    snapshot: snapshotId,
+    previous: previousId,
     published_at,
     claims: publishedClaims,
   };
-  const diff = computeDiff(publishedClaims, effectivePrev);
 
-  // 5. Write the immutable snapshot (never mutate an existing COMPLETE one). Robustness: gate
-  // `reused` on the snapshot's data/head.json EXISTING, not merely the dir. A prior publish that
-  // created the dir but crashed before writing data/ leaves a wedged half-snapshot; treating the
-  // dir alone as "reused" would skip the data write and then crash at the cpSync of data/head.json
-  // (ENOENT) on every future publish. By checking the completion marker (data/head.json) we
-  // (re)write a half-built snapshot to completion instead of wedging. A genuinely complete snapshot
-  // is still left byte-identical (immutability preserved: we only write when incomplete).
+  // 5. Freeze the immutable, content-addressed, canonical-only OKF bundle. A complete snapshot is
+  // identified by its head.json existing; a half-built dir (crash mid-freeze) is cleared and rebuilt.
   const snapshotDir = join(paths.snapshotsDir, snapshotId);
-  const snapshotHead = join(snapshotDir, "data", "head.json");
-  const reused = existsSync(snapshotHead);
+  const snapshotHeadPath = join(snapshotDir, "head.json");
+  const reused = existsSync(snapshotHeadPath);
   if (!reused) {
-    // Copy the prebuilt static bundle FIRST (index.html + assets/ + fonts/, NOT its dev data/),
-    // then write the real data/ on top so the snapshot is self-contained (decision F). If a wedged
-    // half-snapshot dir exists, clear it first so the bundle copy starts clean.
     if (existsSync(snapshotDir)) rmSync(snapshotDir, { recursive: true, force: true });
-    mkdirSync(snapshotDir, { recursive: true });
-    copySiteBundle(snapshotDir, dist);
-    const dataDir = join(snapshotDir, "data");
-    mkdirSync(dataDir, { recursive: true });
-    writeFileSync(snapshotHead, JSON.stringify(head, null, 2) + "\n", "utf8");
-    writeFileSync(join(dataDir, "diff.json"), JSON.stringify(diff, null, 2) + "\n", "utf8");
+    freezeBundle(paths, snapshotDir, claims, canonical, publishedClaims, freshness);
+    writeFileSync(snapshotHeadPath, JSON.stringify(head, null, 2) + "\n", "utf8");
   }
 
-  // 6. Mirror newest snapshot to published/latest/ (COPY, decision B) + cairn/head.json.
-  // latest/ and cairn/head.json mirror the IMMUTABLE snapshot exactly. For a reused id (republish
-  // of identical content), that snapshot keeps its ORIGINAL frozen-at-publish freshness (decisions
-  // C+E: same content head == same immutable snapshot), so latest/ and head.json stay byte-aligned
-  // with the snapshot rather than carrying a divergent freshly-frozen copy.
-  if (existsSync(paths.publishedLatestDir)) {
-    rmSync(paths.publishedLatestDir, { recursive: true, force: true });
-  }
-  mkdirSync(paths.publishedLatestDir, { recursive: true });
-  cpSync(snapshotDir, paths.publishedLatestDir, { recursive: true });
-  cpSync(join(snapshotDir, "data", "head.json"), paths.headJsonPath);
+  // 6. Emit the live orient surface to cairn/index.md + append the diff entry to log.md.
+  const orient = buildOrientSurface(canonical, freshness);
+  writeFileSync(paths.indexPath, renderIndexMd(orient, published_at), "utf8");
+  appendLog(paths, logEntry(snapshotId, previousId, published_at, promoted, diff, reused));
 
   // 7. Warn-only reconcile (never blocks).
   const report = reconcile(paths.hostRoot, config, claims);
 
   return { snapshotId, previousId, promoted, head, diff, reconcile: report, reused };
+}
+
+/**
+ * Freeze the canonical-only OKF bundle into snapshots/<id>/: the frozen canonical claim files, the
+ * estimand/confound nodes they reference (carried by reference into the bundle), and a frozen
+ * index.md orient surface. Drafts are NEVER copied into a snapshot bundle (ADR-0001).
+ */
+function freezeBundle(
+  paths: StorePaths,
+  snapshotDir: string,
+  claims: ClaimFile[],
+  canonical: ClaimFile["frontmatter"][],
+  publishedClaims: PublishedClaim[],
+  freshness: Map<string, import("./types.ts").FreshnessState>,
+): void {
+  const claimsDir = join(snapshotDir, "claims");
+  const estimandsDir = join(snapshotDir, "estimands");
+  const confoundsDir = join(snapshotDir, "confounds");
+  mkdirSync(claimsDir, { recursive: true });
+  mkdirSync(estimandsDir, { recursive: true });
+  mkdirSync(confoundsDir, { recursive: true });
+
+  const canonicalIds = new Set(canonical.map((fm) => fm.id));
+  const byId = new Map(claims.map((c) => [c.frontmatter.id, c]));
+
+  // Frozen canonical claim files (copied byte-for-byte from the live store).
+  const estimandRefs = new Set<string>();
+  const confoundRefs = new Set<string>();
+  for (const id of canonicalIds) {
+    const c = byId.get(id);
+    if (!c) continue;
+    cpSync(c.path, join(claimsDir, `${id}.md`));
+    if (c.frontmatter.estimand) estimandRefs.add(c.frontmatter.estimand);
+    for (const cfd of c.frontmatter.inherits_caveat) confoundRefs.add(cfd);
+  }
+
+  // Carry referenced estimand / confound nodes into the bundle (by reference).
+  for (const eid of estimandRefs) {
+    const src = join(paths.estimandsDir, `${eid}.md`);
+    if (existsSync(src)) cpSync(src, join(estimandsDir, `${eid}.md`));
+  }
+  for (const cid of confoundRefs) {
+    const src = join(paths.confoundsDir, `${cid}.md`);
+    if (existsSync(src)) cpSync(src, join(confoundsDir, `${cid}.md`));
+  }
+
+  // Frozen orient surface of this snapshot.
+  const orient = buildOrientSurface(canonical, freshness);
+  writeFileSync(join(snapshotDir, "index.md"), renderIndexMd(orient, undefined), "utf8");
+}
+
+/** A one-line, machine-greppable log.md entry for a publish (the time spine). */
+function logEntry(
+  snapshotId: string,
+  previousId: string | null,
+  published_at: string,
+  promoted: string[],
+  diff: SnapshotDiff,
+  reused: boolean,
+): string {
+  const c = diff.counts;
+  const tail =
+    `prev=${previousId ?? "(none)"} at=${published_at} ` +
+    `promoted=${promoted.length} +${c.added} -${c.removed} ` +
+    `text=${c.text_changed} fresh=${c.freshness_changed} verif=${c.verification_changed} resol=${c.resolution_changed}` +
+    (reused ? " (reused)" : "");
+  return `- publish ${snapshotId}  ${tail}`;
 }
