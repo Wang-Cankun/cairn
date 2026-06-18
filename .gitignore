@@ -24,3 +24,8 @@ venv/
 
 # reference papers (PDFs — kept out of git to avoid binary bloat; not source of truth)
 docs/ref/
+
+# generated whitebook PDF + raw design transcript (transcript carries un-anonymized context)
+docs/WHITEBOOK.pdf
+docs/chat/
+docs/ARCHITECTURE-as-built.html
