@@ -1,5 +1,7 @@
 # Cairn
 
+**English** | [中文](README.zh.md)
+
 [![release](https://img.shields.io/github/v/release/Wang-Cankun/cairn?sort=semver)](https://github.com/Wang-Cankun/cairn/releases) ![bun](https://img.shields.io/badge/bun-%E2%89%A51.3-black)
 
 > A **deterministic, anti-laundering substrate** for AI-driven analysis. Cairn records an agent's conclusions as versioned **claims** that carry their evidence, conditions, contradictions, and freshness — and enforces consistency without ever interpreting, scoring, or deciding for you.
