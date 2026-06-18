@@ -1,67 +1,62 @@
 import { describe, expect, test } from "bun:test";
 import { runGate } from "../src/gate.ts";
-import { fileEdge, fm } from "./helpers.ts";
+import { fileEvidence, fm } from "./helpers.ts";
 import type { ClaimFile, ClaimFrontmatter } from "../src/types.ts";
 
 function cf(frontmatter: ClaimFrontmatter): ClaimFile {
   return { frontmatter, body: "", path: `/tmp/${frontmatter.id}.md` };
 }
 
-describe("reach-ground gate (iron rule)", () => {
-  test("a grounded chain passes (B depends_on grounded A)", () => {
-    // A has a grounding edge -> promotable. B grounds via its OWN edge AND depends on A.
-    const a = cf(fm({ id: "claim-20260610-001", grounding: [fileEdge("a.csv", "sha256:1")] }));
-    const b = cf(fm({ id: "claim-20260610-002", grounding: [fileEdge("b.csv", "sha256:2")], depends_on: ["claim-20260610-001"] }));
+/** Ids of claims named by any reach-ground violation. */
+function reachOffenders(claims: ClaimFile[]): string[] {
+  return runGate(claims)
+    .violations.filter((v) => v.gate === "reach-ground")
+    .map((v) => v.claim)
+    .sort();
+}
+
+describe("reach-ground gate (iron rule) — v2: per-claim grounding edge", () => {
+  test("two grounded drafts both pass and are both promotable candidates", () => {
+    const a = cf(fm({ id: "claim-20260610-001", evidence_lines: [fileEvidence("a.csv")] }));
+    const b = cf(fm({ id: "claim-20260610-002", evidence_lines: [fileEvidence("b.csv")] }));
     const r = runGate([a, b]);
     expect(r.ok).toBe(true);
-    expect(r.offenders).toEqual([]);
-    // both have a grounding edge -> both are promotable drafts (candidateIds)
+    expect(reachOffenders([a, b])).toEqual([]);
+    // both carry a grounding edge -> both are promotable drafts (candidateIds)
     expect(r.candidateIds.sort()).toEqual(["claim-20260610-001", "claim-20260610-002"]);
   });
 
-  test("a draft that grounds ONLY via a grounded dependency is not promoted (no own edge)", () => {
-    // B has zero grounding edges -> not a promotable draft, even though it reaches ground via A.
-    const a = cf(fm({ id: "claim-20260610-001", grounding: [fileEdge("a.csv", "sha256:1")] }));
-    const b = cf(fm({ id: "claim-20260610-002", depends_on: ["claim-20260610-001"] }));
-    const r = runGate([a, b]);
-    expect(r.ok).toBe(true);
-    expect(r.candidateIds).toEqual(["claim-20260610-001"]); // B stays a draft
-  });
-
-  test("an ungrounded candidate blocks (depends only on an ungrounded draft)", () => {
-    // A is a zero-edge draft (not a candidate). B grounds (so candidate) but depends on A only
-    // — still reaches ground via its own edge, so to truly block we make B depend ONLY on A and
-    // have B itself ungrounded but with a dep -> not a candidate (zero grounding). Instead model:
-    // C has a grounding edge AND depends on an ungrounded draft, which still passes. The real
-    // block is a candidate that has NO direct edge and whose deps never reach ground.
-    // Construct: B has zero grounding but we force it via a dep-only path that fails.
-    // A: ungrounded draft (zero edges) -> not candidate, stays draft.
-    // B: grounded draft depends_on A -> candidate, reaches ground via own edge -> passes.
-    // To get a blocker we need a candidate without ground: that only happens for canonical claims
-    // (already promoted) that lost grounding, or a candidate created by grounding then... Use a
-    // canonical claim with no edges depending on an ungrounded draft:
-    const a = cf(fm({ id: "claim-20260610-001" })); // ungrounded draft, not a candidate
-    const c = cf(fm({ id: "claim-20260610-003", status: "canonical", depends_on: ["claim-20260610-001"] }));
-    const r = runGate([a, c]);
-    expect(r.ok).toBe(false);
-    expect(r.offenders).toContain("claim-20260610-003");
-  });
-
-  test("a cycle never reaches ground and blocks", () => {
-    // Two canonical claims depending on each other, neither grounded.
-    const x = cf(fm({ id: "claim-20260610-001", status: "canonical", depends_on: ["claim-20260610-002"] }));
-    const y = cf(fm({ id: "claim-20260610-002", status: "canonical", depends_on: ["claim-20260610-001"] }));
-    const r = runGate([x, y]);
-    expect(r.ok).toBe(false);
-    expect(r.offenders.sort()).toEqual(["claim-20260610-001", "claim-20260610-002"]);
-  });
-
-  test("zero-edge draft is not a candidate and does not block", () => {
-    const a = cf(fm({ id: "claim-20260610-001", grounding: [fileEdge("a.csv", "sha256:1")] }));
-    const bare = cf(fm({ id: "claim-20260610-002" })); // zero edges
+  test("a zero-edge draft is NOT a candidate (softness lives before the gate) and never blocks", () => {
+    const a = cf(fm({ id: "claim-20260610-001", evidence_lines: [fileEvidence("a.csv")] }));
+    const bare = cf(fm({ id: "claim-20260610-002" })); // zero evidence refs
     const r = runGate([a, bare]);
     expect(r.ok).toBe(true);
-    expect(r.candidateIds).toEqual(["claim-20260610-001"]);
+    expect(r.candidateIds).toEqual(["claim-20260610-001"]); // bare stays a draft, not promoted
     expect(r.candidateIds).not.toContain("claim-20260610-002");
+  });
+
+  test("an ungrounded CANONICAL claim blocks (it is already a candidate and cannot reach ground)", () => {
+    // A canonical claim that carries no evidence ref cannot reach ground -> reach-ground violation.
+    const c = cf(fm({ id: "claim-20260610-003", lifecycle: "canonical" })); // no evidence
+    const r = runGate([c]);
+    expect(r.ok).toBe(false);
+    expect(reachOffenders([c])).toContain("claim-20260610-003");
+  });
+
+  test("a grounded canonical claim passes", () => {
+    const c = cf(fm({ id: "claim-20260610-004", lifecycle: "canonical", evidence_lines: [fileEvidence("c.csv")] }));
+    const r = runGate([c]);
+    expect(r.ok).toBe(true);
+    expect(reachOffenders([c])).toEqual([]);
+  });
+
+  test("mixed set: ungrounded canonical blocks, grounded draft promotes", () => {
+    const bad = cf(fm({ id: "claim-20260610-001", lifecycle: "canonical" })); // ungrounded canonical
+    const good = cf(fm({ id: "claim-20260610-002", evidence_lines: [fileEvidence("g.csv")] })); // grounded draft
+    const r = runGate([bad, good]);
+    expect(r.ok).toBe(false);
+    expect(reachOffenders([bad, good])).toEqual(["claim-20260610-001"]);
+    // the grounded draft is still a promotion candidate
+    expect(r.candidateIds).toEqual(["claim-20260610-002"]);
   });
 });

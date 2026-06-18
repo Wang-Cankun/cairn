@@ -1,29 +1,38 @@
 /**
- * fingerprint.ts — compute / re-compute an evidence edge's fingerprint by method.
+ * fingerprint.ts — compute / re-compute the fingerprint of one evidence ref (ADR-0002 / ADR-0003).
  *
- * Methods:
- *  - sha256:        Bun.file + crypto over the local file at host-root-relative `location`.
- *  - size-mtime:    weak fallback "<size>-<mtimeMs>" when content hashing is impractical.
- *  - pipeline-meta: parse the targets meta store (a space-separated table with a header row),
- *                   look up the row by target name, read its `data` content-hash column.
- *  - remote-md5:    run `ssh <remote_host> md5sum <path>` (short timeout); unreachable -> "unknown".
- *                   The host comes from `config.remote_host` (CONTRACTS §8) and the bare `ref` is
- *                   the remote path. For backward compat a `host:path` ref also works when no
- *                   remote_host is configured.
+ * Freshness is derived from a fingerprint of the EVIDENCE ARTIFACT a claim points at, not from the
+ * compute process (ADR-0002). Each EvidenceRef is fingerprinted into a tiered Fingerprint:
  *
- * All `location`/`ref` paths are HOST-ROOT-relative (decision D); callers pass hostRoot so
- * re-fingerprinting is location-independent. The remote host (config.remote_host) is threaded
- * through as an optional trailing arg so freshness/stamping stays location- AND host-aware.
+ *   dvc:<path.dvc>   -> tier `dvc-md5`     — read the md5 out of the `.dvc` pointer (TOP tier:
+ *                       rigorous + versioned). The `.dvc` file is YAML with an `outs:` list; the
+ *                       first out's `md5` is the artifact's content hash.
+ *   file:<path>      -> tier `content-hash` — sha256 of the local file bytes; falls back to
+ *                       `size-mtime` (weak) if the file is too large / unreadable but stat-able;
+ *                       `unknown` if unreachable.
+ *   external:<uri>   -> tier `unknown`     — unreachable-by-default (URL/DOI); a false `fresh` is the
+ *                       enemy, so an external ref contributes `unknown` freshness.
+ *
+ * The `targets-hash` tier (a pipeline meta store's content hash) is reachable from a `dvc`/`file`
+ * ref only when the ref names a meta store; v2 does not auto-derive it from kind, so it is computed
+ * only on explicit request via `targetsHash`. It remains in the tier ordering for completeness.
+ *
+ * All paths are HOST-ROOT-relative (decision D); callers pass `hostRoot` so re-fingerprinting is
+ * location-independent. `value` is null exactly when `tier === "unknown"`.
  */
 
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
-import type { EvidenceKind, FingerprintMethod, GroundingEdge } from "./types.ts";
+import { parse as parseYaml } from "yaml";
+import type { EvidenceRef, Fingerprint, FingerprintTier } from "./types.ts";
 
-/** Sentinel for an unreachable / un-recheckable artifact. */
-export const UNKNOWN = "unknown";
+/** Sentinel tier for an unreachable / un-recheckable artifact. */
+export const UNKNOWN_TIER: FingerprintTier = "unknown";
+
+/** Size (bytes) above which `file:` refs fall back to size-mtime rather than full sha256. */
+const SHA256_MAX_BYTES = 256 * 1024 * 1024; // 256 MiB
 
 const SSH_TIMEOUT_MS = 5000;
 
@@ -31,99 +40,112 @@ function resolveHostPath(hostRoot: string, p: string): string {
   return isAbsolute(p) ? p : join(hostRoot, p);
 }
 
-/** Pick a method from an evidence kind at stamping time (CONTRACTS §8). */
-export function methodForKind(
-  kind: EvidenceKind,
-  hostRoot: string,
-  ref: string,
-  location: string,
-  remoteHost?: string,
-): FingerprintMethod {
-  switch (kind) {
-    case "target":
-      return "pipeline-meta";
-    case "external":
-      return "remote-md5";
-    case "file":
-      return "sha256";
-    case "data": {
-      // Treat as a local file if reachable; else remote (CONTRACTS §8: "local → file, else remote").
-      const abs = resolveHostPath(hostRoot, location || ref);
-      if (existsSync(abs) && !ref.includes(":")) return "sha256";
-      if (ref.includes(":") || remoteHost) return "remote-md5";
-      return "sha256";
-    }
-  }
+/** Build a `Fingerprint` value; `value` is forced null iff the tier is `unknown`. */
+function fp(ref: string, tier: FingerprintTier, value: string | null, taken_at: string): Fingerprint {
+  return { ref, tier, value: tier === "unknown" ? null : value, taken_at };
 }
 
-/** sha256 of a local file -> "sha256:<hex>", or UNKNOWN if unreachable. */
-export function sha256File(hostRoot: string, location: string): string {
-  const abs = resolveHostPath(hostRoot, location);
-  if (!existsSync(abs)) return UNKNOWN;
-  try {
-    const buf = readFileSync(abs);
-    const hex = createHash("sha256").update(buf).digest("hex");
-    return `sha256:${hex}`;
-  } catch {
-    return UNKNOWN;
-  }
-}
+// ──────────────────────────────────────────────────────────────────────────────
+// Per-kind fingerprinters (each returns a {tier,value}; value null ⇒ unknown)
+// ──────────────────────────────────────────────────────────────────────────────
 
-/** Weak size+mtime signature -> "size-mtime:<bytes>-<mtimeMs>", or UNKNOWN if unreachable. */
-export function sizeMtimeFile(hostRoot: string, location: string): string {
-  const abs = resolveHostPath(hostRoot, location);
-  if (!existsSync(abs)) return UNKNOWN;
+/**
+ * Read the top-tier md5 out of a DVC pointer file. A `.dvc` file is YAML of the shape:
+ *   outs:
+ *     - md5: <hash>
+ *       path: <relpath>
+ * We return the first out's `md5` as the `dvc-md5` value. Unreachable / malformed ⇒ unknown.
+ */
+export function dvcMd5(hostRoot: string, dvcPath: string): { tier: FingerprintTier; value: string | null } {
+  const abs = resolveHostPath(hostRoot, dvcPath);
+  if (!existsSync(abs)) return { tier: "unknown", value: null };
+  let parsed: unknown;
   try {
-    const st = statSync(abs);
-    return `size-mtime:${st.size}-${Math.round(st.mtimeMs)}`;
+    parsed = parseYaml(readFileSync(abs, "utf8"));
   } catch {
-    return UNKNOWN;
+    return { tier: "unknown", value: null };
   }
+  if (typeof parsed !== "object" || parsed === null) return { tier: "unknown", value: null };
+  const outs = (parsed as Record<string, unknown>).outs;
+  if (!Array.isArray(outs) || outs.length === 0) return { tier: "unknown", value: null };
+  const first = outs[0];
+  if (typeof first !== "object" || first === null) return { tier: "unknown", value: null };
+  const md5 = (first as Record<string, unknown>).md5;
+  if (typeof md5 !== "string" || md5.length === 0) return { tier: "unknown", value: null };
+  return { tier: "dvc-md5", value: `md5:${md5}` };
 }
 
 /**
- * Parse the targets-style meta store and return the content hash for `targetName`.
- *
- * The meta store (`_targets/meta/meta`) is a space-separated table with a header row. We locate
- * the `name` and `data` columns from the header, then look up the row whose `name` equals
- * `targetName` and return its `data` cell (the content hash). Returns UNKNOWN if the store or row
- * is missing.
+ * sha256 of a local file. Returns `content-hash` on success, falls back to `size-mtime` (weak) when
+ * the file is stat-able but too large/unreadable to hash, and `unknown` if unreachable.
  */
-export function pipelineMetaHash(hostRoot: string, metaStore: string, targetName: string): string {
+export function contentHash(hostRoot: string, location: string): { tier: FingerprintTier; value: string | null } {
+  const abs = resolveHostPath(hostRoot, location);
+  if (!existsSync(abs)) return { tier: "unknown", value: null };
+  let size: number;
+  let mtimeMs: number;
+  try {
+    const st = statSync(abs);
+    size = st.size;
+    mtimeMs = st.mtimeMs;
+  } catch {
+    return { tier: "unknown", value: null };
+  }
+  if (size <= SHA256_MAX_BYTES) {
+    try {
+      const buf = readFileSync(abs);
+      const hex = createHash("sha256").update(buf).digest("hex");
+      return { tier: "content-hash", value: `sha256:${hex}` };
+    } catch {
+      // fall through to size-mtime
+    }
+  }
+  return { tier: "size-mtime", value: `size-mtime:${size}-${Math.round(mtimeMs)}` };
+}
+
+/**
+ * Read the targets-style meta store and return the content hash for `targetName` as a `targets-hash`
+ * fingerprint. The meta store is a space-separated table with a header row; we read the `data`
+ * column for the row whose `name` equals `targetName`. Unreachable / missing ⇒ unknown.
+ * (Not auto-selected from EvidenceKind in v2; available for explicit use.)
+ */
+export function targetsHash(
+  hostRoot: string,
+  metaStore: string,
+  targetName: string,
+): { tier: FingerprintTier; value: string | null } {
   const abs = resolveHostPath(hostRoot, metaStore);
-  if (!existsSync(abs)) return UNKNOWN;
+  if (!existsSync(abs)) return { tier: "unknown", value: null };
   let text: string;
   try {
     text = readFileSync(abs, "utf8");
   } catch {
-    return UNKNOWN;
+    return { tier: "unknown", value: null };
   }
   const lines = text.split(/\r?\n/).filter((l) => l.length > 0);
-  if (lines.length < 2) return UNKNOWN;
+  if (lines.length < 2) return { tier: "unknown", value: null };
   const header = (lines[0] as string).split(/\s+/);
   const nameIdx = header.indexOf("name");
   const dataIdx = header.indexOf("data");
-  if (nameIdx === -1 || dataIdx === -1) return UNKNOWN;
+  if (nameIdx === -1 || dataIdx === -1) return { tier: "unknown", value: null };
   for (let i = 1; i < lines.length; i++) {
     const cols = (lines[i] as string).split(/\s+/);
     if (cols[nameIdx] === targetName) {
       const data = cols[dataIdx];
-      return data && data.length > 0 ? data : UNKNOWN;
+      return data && data.length > 0
+        ? { tier: "targets-hash", value: `targets:${data}` }
+        : { tier: "unknown", value: null };
     }
   }
-  return UNKNOWN;
+  return { tier: "unknown", value: null };
 }
 
 /**
- * Re-fingerprint a remote artifact via `ssh <remote_host> md5sum <path>`. Short timeout; any
- * failure (host unreachable, ssh error, no md5sum) -> UNKNOWN.
- *
- * Host resolution (CONTRACTS §8): if `remoteHost` is configured (cairn/config.json `remote_host`),
- * the bare `ref` IS the remote path → `ssh <remote_host> md5sum <ref>`. Otherwise fall back to the
- * legacy `host:path` ref form for backward compat. With neither a configured host nor a `host:path`
- * ref, there is no host to reach → UNKNOWN (honest; a false `fresh` is the enemy).
+ * Re-fingerprint a remote artifact via `ssh <remote_host> md5sum <path>`. Short timeout; any failure
+ * (host unreachable, ssh error, no md5sum) ⇒ unknown. Used as the freshness source for a `file:` ref
+ * whose bytes live on a configured remote host rather than the local host root.
  */
-export function remoteMd5(ref: string, remoteHost?: string): string {
+export function remoteMd5(ref: string, remoteHost?: string): { tier: FingerprintTier; value: string | null } {
   let host: string;
   let path: string;
   if (remoteHost) {
@@ -131,66 +153,65 @@ export function remoteMd5(ref: string, remoteHost?: string): string {
     path = ref;
   } else {
     const idx = ref.indexOf(":");
-    if (idx === -1) return UNKNOWN;
+    if (idx === -1) return { tier: "unknown", value: null };
     host = ref.slice(0, idx);
     path = ref.slice(idx + 1);
   }
-  if (!host || !path) return UNKNOWN;
+  if (!host || !path) return { tier: "unknown", value: null };
   try {
     const res = spawnSync(
       "ssh",
-      ["-o", "BatchMode=yes", "-o", `ConnectTimeout=3`, host, "md5sum", path],
+      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, "md5sum", path],
       { timeout: SSH_TIMEOUT_MS, encoding: "utf8" },
     );
-    if (res.status !== 0 || res.error || !res.stdout) return UNKNOWN;
+    if (res.status !== 0 || res.error || !res.stdout) return { tier: "unknown", value: null };
     const hash = res.stdout.trim().split(/\s+/)[0];
-    return hash && /^[0-9a-f]{32}$/i.test(hash) ? `md5:${hash}` : UNKNOWN;
+    return hash && /^[0-9a-f]{32}$/i.test(hash)
+      ? { tier: "content-hash", value: `md5:${hash}` }
+      : { tier: "unknown", value: null };
   } catch {
-    return UNKNOWN;
+    return { tier: "unknown", value: null };
   }
 }
 
 /**
- * Compute the current fingerprint for an edge by its `method`. Used both at stamp time and at
- * freshness-recompute time. Returns UNKNOWN when the artifact is unreachable.
+ * Compute the current fingerprint for one evidence ref, dispatching by `kind`. This is the single
+ * entry point used at both stamp time (author/refresh) and freshness-recompute time.
+ *
+ *   dvc      -> dvcMd5      (top tier)
+ *   file     -> contentHash locally; or remoteMd5 when a remote host is configured and the file is
+ *               not present in the local host root (remote HPC artifacts, ADR-0002)
+ *   external -> unknown     (unreachable by default)
  */
-export function fingerprintByMethod(
+export function fingerprintRef(hostRoot: string, ref: EvidenceRef, taken_at: string, remoteHost?: string): Fingerprint {
+  switch (ref.kind) {
+    case "dvc": {
+      const r = dvcMd5(hostRoot, ref.ref);
+      return fp(ref.ref, r.tier, r.value, taken_at);
+    }
+    case "file": {
+      const abs = resolveHostPath(hostRoot, ref.ref);
+      if (!existsSync(abs) && remoteHost) {
+        const r = remoteMd5(ref.ref, remoteHost);
+        return fp(ref.ref, r.tier, r.value, taken_at);
+      }
+      const r = contentHash(hostRoot, ref.ref);
+      return fp(ref.ref, r.tier, r.value, taken_at);
+    }
+    case "external":
+      return fp(ref.ref, "unknown", null, taken_at);
+  }
+}
+
+/**
+ * Stamp fingerprints for every ref across a claim's evidence lines (flattened). Order follows the
+ * lines' refs in declaration order; one Fingerprint per ref.
+ */
+export function stampFingerprints(
   hostRoot: string,
-  method: FingerprintMethod,
-  ref: string,
-  location: string,
+  refs: EvidenceRef[],
+  taken_at: string,
   remoteHost?: string,
-): string {
-  switch (method) {
-    case "sha256":
-      return sha256File(hostRoot, location);
-    case "size-mtime":
-      return sizeMtimeFile(hostRoot, location);
-    case "pipeline-meta":
-      return pipelineMetaHash(hostRoot, location, ref);
-    case "remote-md5":
-      return remoteMd5(ref, remoteHost);
-  }
-}
-
-/**
- * Stamp a fresh GroundingEdge from a kind+ref at author/ground time, choosing method by kind and
- * computing the fingerprint now (CONTRACTS §8). `location` defaults: file/data -> ref; target ->
- * the meta store; external -> ref.
- */
-export function stampEdge(
-  hostRoot: string,
-  kind: EvidenceKind,
-  ref: string,
-  opts: { metaStore?: string; remoteHost?: string } = {},
-): GroundingEdge {
-  const metaStore = opts.metaStore ?? "_targets/meta/meta";
-  let location: string;
-  if (kind === "target") location = metaStore;
-  else if (kind === "external") location = ref;
-  else location = ref; // file | data
-
-  const method = methodForKind(kind, hostRoot, ref, location, opts.remoteHost);
-  const fingerprint = fingerprintByMethod(hostRoot, method, ref, location, opts.remoteHost);
-  return { kind, ref, fingerprint, method, location };
+): Fingerprint[] {
+  return refs.map((r) => fingerprintRef(hostRoot, r, taken_at, remoteHost));
 }

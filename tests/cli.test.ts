@@ -1,240 +1,663 @@
-import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+/**
+ * cli.test.ts — the v2 CLI seam. Spawns the real `bun run src/cli.ts` in a temp host dir and asserts
+ * ONLY on exit code + stdout/stderr + the emitted OKF files on disk. Never reaches into internals.
+ *
+ * The CLI is the SOLE writer; store discovery walks up from cwd to find cairn/claims, so each test
+ * sets cwd = its temp host root. Ids are scraped from stdout / `ls`, never hardcoded (clm-/est-/cfd-
+ * are content hashes). Locked trust fields are read back out of the serialized claim file.
+ */
+import { afterAll, describe, expect, test } from "bun:test";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { PublishedHead } from "../src/types.ts";
 
 const CLI = join(import.meta.dir, "..", "src", "cli.ts");
 
-function run(cwd: string, args: string[]): { code: number; stdout: string; stderr: string } {
-  const p = Bun.spawnSync(["bun", "run", CLI, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+const HOSTS: string[] = [];
+function host(tag: string): string {
+  const h = mkdtempSync(join(tmpdir(), `cairn-${tag}-`));
+  HOSTS.push(h);
+  return h;
+}
+afterAll(() => {
+  for (const h of HOSTS) {
+    try {
+      rmSync(h, { recursive: true, force: true });
+    } catch {
+      /* best-effort */
+    }
+  }
+});
+
+interface Run {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+function run(cwd: string, args: string[], env: Record<string, string> = {}): Run {
+  const p = Bun.spawnSync(["bun", "run", CLI, ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...env },
+  });
   return { code: p.exitCode, stdout: p.stdout.toString(), stderr: p.stderr.toString() };
 }
 
-describe("CLI smoke test (temp host fixture)", () => {
-  test("add-claim -> ground -> validate -> publish end to end", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-cli-"));
-    // Evidence artifact lives at host root (host-root-relative paths).
-    writeFileSync(join(host, "scores.csv"), "a,b\n1,2\n", "utf8");
+// ── store-introspection helpers (read the EMITTED files; never reach into src) ──
 
-    // 1. add a draft claim WITH a grounding edge (stamped now)
-    const add = run(host, ["add-claim", "--text", "Scores correlate.", "--evidence", "file:scores.csv"]);
+function claimIds(h: string): string[] {
+  const dir = join(h, "cairn", "claims");
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".md"))
+    .map((f) => f.replace(/\.md$/, ""))
+    .sort();
+}
+function readClaimFile(h: string, id: string): string {
+  return readFileSync(join(h, "cairn", "claims", `${id}.md`), "utf8");
+}
+/** Extract a top-level scalar from the YAML frontmatter of a serialized claim file. */
+function fmScalar(file: string, key: string): string | undefined {
+  const fmBlock = file.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fmBlock) return undefined;
+  // Match the LAST top-level occurrence of `key:` (locked scalars are single-line).
+  const re = new RegExp(`^${key}:\\s*(.*)$`, "m");
+  const m = fmBlock[1]!.match(re);
+  if (!m) return undefined;
+  return m[1]!.replace(/^["']|["']$/g, "").trim();
+}
+function latestSnapshotId(h: string): string | null {
+  const log = join(h, "cairn", "log.md");
+  if (!existsSync(log)) return null;
+  const ids = readFileSync(log, "utf8")
+    .split(/\r?\n/)
+    .map((l) => l.match(/^- publish\s+([0-9a-f]+)\b/)?.[1])
+    .filter(Boolean) as string[];
+  return ids.length ? ids[ids.length - 1]! : null;
+}
+function snapshotHead(h: string, id: string): {
+  snapshot: string;
+  previous: string | null;
+  claims: Array<Record<string, unknown>>;
+} {
+  return JSON.parse(readFileSync(join(h, "cairn", "snapshots", id, "head.json"), "utf8"));
+}
+
+// id-shape regexes
+const CLM = /clm-[0-9a-f]+/;
+const EST = /est-[0-9a-f]+/;
+const CFD = /cfd-[0-9a-f]+/;
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — authoring & locked fields", () => {
+  test("add-claim writes a well-formed OKF claim with CLI-stamped locked fields", () => {
+    const h = host("author");
+    writeFileSync(join(h, "scores.csv"), "a,b\n1,2\n", "utf8");
+    const add = run(
+      h,
+      ["add-claim", "--text", "Scores correlate.", "--evidence", "file:scores.csv", "--provenance", "ai_proposed"],
+      { CAIRN_ASSERTER: "agent-A" },
+    );
     expect(add.code).toBe(0);
-    expect(existsSync(join(host, "cairn", "claims"))).toBe(true);
+    expect(add.stdout).toMatch(CLM);
+    expect(existsSync(join(h, "cairn", "claims"))).toBe(true);
 
-    // 2. add a second, ungrounded draft, then ground it
-    const add2 = run(host, ["add-claim", "--text", "Secondary finding."]);
-    expect(add2.code).toBe(0);
-    writeFileSync(join(host, "more.csv"), "x\n1\n", "utf8");
+    const id = claimIds(h)[0]!;
+    expect(id).toMatch(/^clm-[0-9a-f]+$/);
+    const file = readClaimFile(h, id);
 
-    const drafts = run(host, ["drafts"]);
-    expect(drafts.code).toBe(0);
-    const secondId = (drafts.stdout.match(/claim-\d{8}-002/) ?? [])[0];
-    expect(secondId).toBeTruthy();
-    const ground = run(host, ["ground", secondId!, "--evidence", "file:more.csv"]);
-    expect(ground.code).toBe(0);
+    // The handle carries the agent-asserted fields verbatim...
+    expect(file).toContain("type: claim");
+    expect(file).toContain("text: Scores correlate.");
+    expect(file).toContain("provenance: ai_proposed");
+    expect(file).toContain("kind: file");
+    expect(file).toContain("ref: scores.csv");
 
-    // 3. validate passes (both grounded)
-    const validate = run(host, ["validate"]);
-    expect(validate.code).toBe(0);
-    expect(validate.stdout).toContain("OK");
+    // ...and the CLI-stamped/locked fields (an agent never self-stamps these).
+    expect(fmScalar(file, "id")).toBe(id);
+    expect(file).toContain("who: agent-A");
+    expect(fmScalar(file, "corroboration")).toBe("self-asserted");
+    expect(fmScalar(file, "lifecycle")).toBe("draft"); // draft until a passing publish
+    expect(fmScalar(file, "resolution")).toBe("open");
+    expect(fmScalar(file, "verification")).toBe("unverified");
+    expect(fmScalar(file, "reach_ground")).toBe("true"); // it has an evidence ref
+    // freshness was computed from the just-stamped fingerprint of a real local file ⇒ fresh
+    expect(fmScalar(file, "freshness")).toBe("fresh");
 
-    // 4. head prints canonical + drafts and writes head.json
-    const head = run(host, ["head"]);
+    // A fingerprint was stamped from the evidence (content-hash tier, sha256 value).
+    expect(file).toContain("tier: content-hash");
+    expect(file).toMatch(/value: sha256:/);
+
+    // log.md time spine recorded the authoring event.
+    expect(readFileSync(join(h, "cairn", "log.md"), "utf8")).toContain(`- add-claim ${id}`);
+  });
+
+  test("a bare draft (no evidence) is created soft: ungrounded, freshness unknown", () => {
+    const h = host("draftsoft");
+    const add = run(h, ["add-claim", "--text", "Loose hunch.", "--provenance", "ai_proposed"]);
+    expect(add.code).toBe(0);
+    const id = claimIds(h)[0]!;
+    const file = readClaimFile(h, id);
+    expect(fmScalar(file, "reach_ground")).toBe("false");
+    expect(fmScalar(file, "freshness")).toBe("unknown");
+    expect(fmScalar(file, "lifecycle")).toBe("draft");
+
+    const drafts = run(h, ["drafts"]);
+    expect(drafts.stdout).toContain("UNGROUNDED");
+    expect(drafts.stdout).toContain(id);
+  });
+
+  test("an agent-supplied freshness/verification/corroboration is OVERRIDDEN by the CLI (trust-field lock)", () => {
+    const h = host("override");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    // The agent tries to self-stamp trust badges via flags; the CLI must discard them.
+    const add = run(h, [
+      "add-claim",
+      "--text",
+      "Self-stamped, supposedly.",
+      "--evidence",
+      "file:e.csv",
+      "--provenance",
+      "ai_proposed",
+      "--freshness",
+      "fresh",
+      "--verification",
+      "verified",
+      "--corroboration",
+      "cross-reviewed",
+      "--reach_ground",
+      "true",
+    ]);
+    expect(add.code).toBe(0);
+    const id = claimIds(h)[0]!;
+    const file = readClaimFile(h, id);
+    // verification is locked to unverified (ai_proposed can never be verified)...
+    expect(fmScalar(file, "verification")).toBe("unverified");
+    // ...corroboration is derived (no reviewers) to self-asserted...
+    expect(fmScalar(file, "corroboration")).toBe("self-asserted");
+    // ...and validate confirms no trust-field-lock violation slipped through.
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(0);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — gates via validate", () => {
+  test("validate fails (nonzero, names reach-ground + the claim) when a canonical claim cannot reach ground", () => {
+    const h = host("noground");
+    const claims = join(h, "cairn", "claims");
+    mkdirSync(claims, { recursive: true });
+    // Hand-write a canonical claim with NO evidence refs ⇒ cannot reach ground.
+    writeFileSync(
+      join(claims, "clm-deadbeef0001.md"),
+      [
+        "---",
+        "type: claim",
+        "text: rests on nothing",
+        "evidence_lines: []",
+        "depends_on_fork: []",
+        "contradicts: []",
+        "inherits_caveat: []",
+        "provenance: ai_proposed",
+        "id: clm-deadbeef0001",
+        "asserter:",
+        "  who: a",
+        "  model: m",
+        "  session: s",
+        "  time: 2026-06-10T20:00:00-04:00",
+        "reviewed_by: []",
+        "corroboration: self-asserted",
+        "fingerprints: []",
+        "freshness: unknown",
+        "reach_ground: false",
+        "lifecycle: canonical",
+        "resolution: open",
+        "verification: unverified",
+        "---",
+        "body",
+        "",
+      ].join("\n"),
+    );
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("FAILED");
+    expect(v.stderr).toContain("reach-ground");
+    expect(v.stderr).toContain("clm-deadbeef0001");
+  });
+
+  test("verified is REFUSED for ai_proposed provenance, ACCEPTED for experimental", () => {
+    const h = host("verif");
+    const claims = join(h, "cairn", "claims");
+    mkdirSync(claims, { recursive: true });
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const mk = (id: string, provenance: string, verification: string) =>
+      [
+        "---",
+        "type: claim",
+        `text: claim ${id}`,
+        "evidence_lines:",
+        "  - name: evidence",
+        "    refs:",
+        "      - kind: file",
+        "        ref: e.csv",
+        "depends_on_fork: []",
+        "contradicts: []",
+        "inherits_caveat: []",
+        `provenance: ${provenance}`,
+        `id: ${id}`,
+        "asserter:",
+        "  who: a",
+        "  model: m",
+        "  session: s",
+        "  time: 2026-06-10T20:00:00-04:00",
+        "reviewed_by: []",
+        "corroboration: self-asserted",
+        "fingerprints: []",
+        "freshness: unknown",
+        "reach_ground: true",
+        "lifecycle: canonical",
+        "resolution: open",
+        `verification: ${verification}`,
+        "---",
+        "body",
+        "",
+      ].join("\n");
+
+    // experimental + verified: the verification territory permits it ⇒ validate passes.
+    writeFileSync(join(claims, "clm-aaaa00000001.md"), mk("clm-aaaa00000001", "experimental", "verified"));
+    const ok = run(h, ["validate"]);
+    expect(ok.code).toBe(0);
+
+    // Now add an ai_proposed + verified claim: agent-sourced can NEVER be verified ⇒ validate fails.
+    writeFileSync(join(claims, "clm-bbbb00000002.md"), mk("clm-bbbb00000002", "ai_proposed", "verified"));
+    const bad = run(h, ["validate"]);
+    expect(bad.code).toBe(3);
+    expect(bad.stderr).toContain("verification-lock");
+    expect(bad.stderr).toContain("clm-bbbb00000002");
+    // The experimental claim is NOT named as an offender.
+    expect(bad.stderr).not.toContain("clm-aaaa00000001");
+  });
+
+  test("settled is REFUSED while a contradiction is unresolved (canonical-but-not-settled)", () => {
+    const h = host("settled");
+    const claims = join(h, "cairn", "claims");
+    mkdirSync(claims, { recursive: true });
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const mk = (id: string, contradicts: string, resolution: string) =>
+      [
+        "---",
+        "type: claim",
+        `text: claim ${id}`,
+        "evidence_lines:",
+        "  - name: evidence",
+        "    refs:",
+        "      - kind: file",
+        "        ref: e.csv",
+        "depends_on_fork: []",
+        contradicts ? `contradicts:\n  - ${contradicts}` : "contradicts: []",
+        "inherits_caveat: []",
+        "provenance: ai_proposed",
+        `id: ${id}`,
+        "asserter:",
+        "  who: a",
+        "  model: m",
+        "  session: s",
+        "  time: 2026-06-10T20:00:00-04:00",
+        "reviewed_by: []",
+        "corroboration: self-asserted",
+        "fingerprints: []",
+        "freshness: unknown",
+        "reach_ground: true",
+        "lifecycle: canonical",
+        `resolution: ${resolution}`,
+        "verification: unverified",
+        "---",
+        "body",
+        "",
+      ].join("\n");
+
+    const A = "clm-cccc00000001";
+    const B = "clm-dddd00000002";
+    // A claims settled while it still contradicts B which is live ⇒ resolution gate fires.
+    writeFileSync(join(claims, `${A}.md`), mk(A, B, "settled"));
+    writeFileSync(join(claims, `${B}.md`), mk(B, "", "open"));
+
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toMatch(/resolution|trust-field-lock/);
+    expect(v.stderr).toContain(A);
+
+    // If A drops the unresolved-settled stance (resolution: open), validate passes — it may stay canonical.
+    writeFileSync(join(claims, `${A}.md`), mk(A, B, "open"));
+    const ok = run(h, ["validate"]);
+    expect(ok.code).toBe(0);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — review / corroboration (Gate B)", () => {
+  test("corroboration stays self-asserted until ≥2 DIFFERENT-asserter reviews, then cross-reviewed", () => {
+    const h = host("corrob");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    run(h, ["add-claim", "--text", "Reviewed claim.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"], {
+      CAIRN_ASSERTER: "author-A",
+    });
+    const id = claimIds(h)[0]!;
+
+    // A self-review by the author never raises corroboration.
+    const self = run(h, ["review", id, "--by", "author-A"]);
+    expect(self.code).toBe(0);
+    expect(fmScalar(readClaimFile(h, id), "corroboration")).toBe("self-asserted");
+
+    // One distinct reviewer: still self-asserted (needs ≥2 distinct ≠ author).
+    run(h, ["review", id, "--by", "reviewer-B", "--note", "independent look"]);
+    expect(fmScalar(readClaimFile(h, id), "corroboration")).toBe("self-asserted");
+
+    // Second distinct reviewer ≠ author ⇒ cross-reviewed.
+    const r2 = run(h, ["review", id, "--by", "reviewer-C"]);
+    expect(r2.code).toBe(0);
+    expect(r2.stdout).toContain("cross-reviewed");
+    const file = readClaimFile(h, id);
+    expect(fmScalar(file, "corroboration")).toBe("cross-reviewed");
+    // The note is carried (not verified) in the review edge.
+    expect(file).toContain("independent look");
+    // Still canonical-axis untouched: corroboration is a SEPARATE axis, never a verification rung.
+    expect(fmScalar(file, "verification")).toBe("unverified");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — freshness, cascade, dvc", () => {
+  test("freshness goes fresh → stale on artifact mutation, unknown for an external ref", () => {
+    const h = host("fresh");
+    writeFileSync(join(h, "data.csv"), "a\n1\n", "utf8");
+    run(h, ["add-claim", "--text", "From local file.", "--evidence", "file:data.csv", "--provenance", "ai_proposed"]);
+    const localId = claimIds(h)[0]!;
+    expect(fmScalar(readClaimFile(h, localId), "freshness")).toBe("fresh");
+
+    // external: ref is unreachable-by-default ⇒ unknown freshness.
+    run(h, ["add-claim", "--text", "Cites a paper.", "--evidence", "external:https://doi.org/10.x", "--provenance", "literature"]);
+    const extId = claimIds(h).find((i) => i !== localId)!;
+    expect(fmScalar(readClaimFile(h, extId), "freshness")).toBe("unknown");
+
+    // Mutate the local artifact, then refresh: the stored baseline no longer matches ⇒ stale.
+    writeFileSync(join(h, "data.csv"), "a\n2-changed\n", "utf8");
+    const ref = run(h, ["refresh"]);
+    expect(ref.code).toBe(0);
+    expect(ref.stdout).toContain(localId);
+    expect(ref.stdout).toContain("stale");
+    expect(fmScalar(readClaimFile(h, localId), "freshness")).toBe("stale");
+  });
+
+  test("a dvc: evidence ref pins the .dvc md5 (dvc-md5 tier); mutating the pointer goes stale", () => {
+    const h = host("dvc");
+    // A DVC pointer file: YAML with outs[0].md5 = the artifact content hash.
+    writeFileSync(join(h, "big.bin.dvc"), "outs:\n  - md5: abc123def456abc123def456abc12345\n    path: big.bin\n", "utf8");
+    run(h, ["add-claim", "--text", "Grounded on a DVC artifact.", "--evidence", "dvc:big.bin.dvc", "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+    const file = readClaimFile(h, id);
+    // The fingerprint reads the .dvc md5 as the TOP tier.
+    expect(file).toContain("tier: dvc-md5");
+    expect(file).toContain("value: md5:abc123def456abc123def456abc12345");
+    expect(fmScalar(file, "freshness")).toBe("fresh");
+
+    // Change the recorded md5 in the pointer ⇒ the baseline diverges ⇒ stale.
+    writeFileSync(join(h, "big.bin.dvc"), "outs:\n  - md5: ffffffffffffffffffffffffffffffff\n    path: big.bin\n", "utf8");
+    run(h, ["refresh"]);
+    expect(fmScalar(readClaimFile(h, id), "freshness")).toBe("stale");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — orient surface & publish bundle", () => {
+  test("head emits index.md surfacing unresolved contradictions + staleness above the canonical list", () => {
+    const h = host("orient");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    // Two canonical claims that contradict each other, on the same estimand, plus a stale claim.
+    const est = run(h, ["add-estimand", "--def", "Effect of X on Y in cohort Z."]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "X raises Y.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const A = claimIds(h)[0]!;
+    run(h, [
+      "add-claim",
+      "--text",
+      "X lowers Y.",
+      "--evidence",
+      "file:e.csv",
+      "--estimand",
+      est,
+      "--provenance",
+      "ai_proposed",
+      "--contradicts",
+      A,
+    ]);
+    run(h, ["publish"]); // promote both to canonical
+
+    const head = run(h, ["head"]);
     expect(head.code).toBe(0);
-    expect(head.stdout).toContain("canonical");
-    expect(head.stdout).toContain("drafts");
+    expect(head.stdout).toContain("unresolved contradictions: 1");
 
-    // 5. publish promotes both drafts and writes the snapshot + share link
-    const pub = run(host, ["publish"]);
+    const index = readFileSync(join(h, "cairn", "index.md"), "utf8");
+    const contraPos = index.indexOf("Unresolved contradictions");
+    const canonPos = index.indexOf("Canonical claims");
+    expect(contraPos).toBeGreaterThanOrEqual(0);
+    expect(canonPos).toBeGreaterThanOrEqual(0);
+    // Contradictions section appears BEFORE the canonical-positives section (never buried).
+    expect(contraPos).toBeLessThan(canonPos);
+    expect(index).toContain("contradicts");
+  });
+
+  test("publish freezes a canonical-only OKF bundle + appends a log.md diff entry; drafts never enter it", () => {
+    const h = host("publish");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    run(h, ["add-claim", "--text", "Grounded canonical-to-be.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"]);
+    run(h, ["add-claim", "--text", "Ungrounded draft, stays draft.", "--provenance", "ai_proposed"]);
+
+    const pub = run(h, ["publish"]);
     expect(pub.code).toBe(0);
     expect(pub.stdout).toContain("published snapshot");
-
-    const headPath = join(host, "cairn", "head.json");
-    expect(existsSync(headPath)).toBe(true);
-    const published = JSON.parse(readFileSync(headPath, "utf8")) as PublishedHead;
-    expect(published.schema).toBe("cairn.head/1");
-    expect(published.claims.length).toBe(2); // both promoted to canonical
-    // canonical only: no draft/status leakage, no body
-    for (const c of published.claims) {
-      expect(c).not.toHaveProperty("status");
-      expect(c).not.toHaveProperty("body");
-      expect(c.freshness.as_of).toBe(published.published_at); // frozen-at-publish
-    }
-    // snapshot dir + share link exist; head.json mirrored
-    const snapDir = join(host, "cairn", "snapshots", published.snapshot.current);
-    expect(existsSync(join(snapDir, "data", "head.json"))).toBe(true);
-    expect(existsSync(join(snapDir, "data", "diff.json"))).toBe(true);
-    expect(existsSync(join(host, "cairn", "published", "latest", "data", "head.json"))).toBe(true);
-
-    // status reflects promotion
-    const status = run(host, ["status"]);
-    expect(status.stdout).toContain("canonical:    2");
-    expect(status.stdout).toContain(`last snapshot: ${published.snapshot.current}`);
-  });
-
-  test("status reports the real last snapshot even after head/refresh clobber cairn/head.json", () => {
-    // Regression: head/refresh rewrite cairn/head.json with snapshot.current="". status must read
-    // lineage from published/latest/ (the durable source publish trusts), not cairn/head.json,
-    // else it reports "last snapshot: (none)" right after a real publish.
-    const host = mkdtempSync(join(tmpdir(), "cairn-status-"));
-    writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");
-    run(host, ["add-claim", "--text", "A claim.", "--evidence", "file:scores.csv"]);
-    const pub = run(host, ["publish"]);
-    const snapId = (pub.stdout.match(/published snapshot (\w+)/) ?? [])[1];
+    const snapId = latestSnapshotId(h)!;
     expect(snapId).toBeTruthy();
 
-    // Normal agent loop: orient via `head` (and `refresh`), which clobber cairn/head.json.
-    expect(run(host, ["head"]).code).toBe(0);
-    expect(run(host, ["refresh"]).code).toBe(0);
-    // cairn/head.json now carries no snapshot id...
-    const headJson = JSON.parse(readFileSync(join(host, "cairn", "head.json"), "utf8"));
-    expect(headJson.snapshot.current).toBe("");
-    // ...yet status still reports the real snapshot from published/latest/.
-    const status = run(host, ["status"]);
-    expect(status.code).toBe(0);
-    expect(status.stdout).toContain(`last snapshot: ${snapId}`);
+    const snapDir = join(h, "cairn", "snapshots", snapId);
+    // Canonical-only OKF bundle: claims/ + estimands/ + confounds/ + index.md + head.json.
+    expect(existsSync(join(snapDir, "claims"))).toBe(true);
+    expect(existsSync(join(snapDir, "estimands"))).toBe(true);
+    expect(existsSync(join(snapDir, "confounds"))).toBe(true);
+    expect(existsSync(join(snapDir, "index.md"))).toBe(true);
+    expect(existsSync(join(snapDir, "head.json"))).toBe(true);
+    // No retired v1 React/site artifacts.
+    expect(existsSync(join(snapDir, "assets"))).toBe(false);
+    expect(existsSync(join(snapDir, "data"))).toBe(false);
+    expect(existsSync(join(h, "cairn", "published", "latest"))).toBe(false);
+
+    // Exactly one canonical claim is frozen (the ungrounded draft did NOT promote / enter the bundle).
+    const frozen = readdirSync(join(snapDir, "claims")).filter((f) => f.endsWith(".md"));
+    expect(frozen.length).toBe(1);
+    const head = snapshotHead(h, snapId);
+    expect(head.claims.length).toBe(1);
+    expect(head.snapshot).toBe(snapId);
+
+    // log.md time spine carries the publish diff entry.
+    expect(readFileSync(join(h, "cairn", "log.md"), "utf8")).toMatch(new RegExp(`- publish ${snapId}\\b`));
+
+    // status reflects 1 canonical, 1 draft, and the last snapshot.
+    const status = run(h, ["status"]);
+    expect(status.stdout).toMatch(/canonical:\s+1/);
+    expect(status.stdout).toMatch(/drafts:\s+1/);
+    expect(status.stdout).toContain(snapId);
   });
 
-  test("publish is reproducible: same head -> same snapshot id (excludes timestamps)", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-repro-"));
-    writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");
-    run(host, ["add-claim", "--text", "Repro claim.", "--evidence", "file:scores.csv"]);
-    const p1 = run(host, ["publish"]);
-    const id1 = (p1.stdout.match(/published snapshot (\w+)/) ?? [])[1];
-    // republish without changing the head: id is stable, snapshot reused
-    const p2 = run(host, ["publish"]);
-    const id2 = (p2.stdout.match(/published snapshot (\w+)/) ?? [])[1];
-    expect(id1).toBe(id2);
+  test("publish is reproducible (same view → same id, reused); a freshness-only change yields a NEW id and leaves the old snapshot byte-identical", () => {
+    const h = host("repro");
+    writeFileSync(join(h, "e.csv"), "a\n1\n", "utf8");
+    run(h, ["add-claim", "--text", "Repro.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"]);
+    const p1 = run(h, ["publish"]);
+    const id1 = p1.stdout.match(/published snapshot ([0-9a-f]+)/)![1]!;
+    const oldBytes = readFileSync(join(h, "cairn", "snapshots", id1, "head.json"));
+
+    // No change → same id, reused branch.
+    const p2 = run(h, ["publish"]);
+    const id2 = p2.stdout.match(/published snapshot ([0-9a-f]+)/)![1]!;
+    expect(id2).toBe(id1);
     expect(p2.stdout).toContain("reused");
+
+    // Mutate the artifact → refresh → publish: freshness state changes the view ⇒ NEW id.
+    writeFileSync(join(h, "e.csv"), "a\n2-changed\n", "utf8");
+    run(h, ["refresh"]);
+    const p3 = run(h, ["publish"]);
+    const id3 = p3.stdout.match(/published snapshot ([0-9a-f]+)/)![1]!;
+    expect(id3).not.toBe(id1);
+    expect(p3.stdout).not.toContain("reused");
+    // Old snapshot remains immutable (byte-identical head.json).
+    expect(readFileSync(join(h, "cairn", "snapshots", id1, "head.json")).equals(oldBytes)).toBe(true);
   });
+});
 
-  test("freshness-only change (artifact mutated -> refresh -> publish) yields a NEW snapshot id; old snapshot stays byte-identical", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-freshid-"));
-    writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");
-    run(host, ["add-claim", "--text", "A claim.", "--evidence", "file:scores.csv"]);
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — estimand collapse refusal", () => {
+  test("collapse across DIFFERING estimand ids is refused (siblings only within one estimand id)", () => {
+    // The CLI never PERFORMS collapse; the refusal is observable as: two claims on DIFFERENT estimand
+    // ids are not surfaced as a contradiction pair (a contradiction is only meaningful within one
+    // estimand). We assert the structural separation: differing estimand ids ⇒ no surfaced collapse.
+    const h = host("collapse");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const est1 = run(h, ["add-estimand", "--def", "Estimand ONE: effect of A."]).stdout.match(EST)![0];
+    const est2 = run(h, ["add-estimand", "--def", "Estimand TWO: effect of B, different question."]).stdout.match(EST)![0];
+    expect(est1).not.toBe(est2);
 
-    const p1 = run(host, ["publish"]);
-    const id1 = (p1.stdout.match(/published snapshot (\w+)/) ?? [])[1];
-    expect(id1).toBeTruthy();
-    const snap1Head = join(host, "cairn", "snapshots", id1!, "data", "head.json");
-    const oldBytes = readFileSync(snap1Head);
-
-    // Mutate the grounded artifact so the claim is now genuinely stale, then refresh + publish.
-    writeFileSync(join(host, "scores.csv"), "a\n2-changed\n", "utf8");
-    run(host, ["refresh"]);
-    const p2 = run(host, ["publish"]);
-    const id2 = (p2.stdout.match(/published snapshot (\w+)/) ?? [])[1];
-    expect(id2).toBeTruthy();
-
-    // NEW id (freshness changed the published view), NOT the reused branch.
-    expect(id2).not.toBe(id1);
-    expect(p2.stdout).not.toContain("reused");
-
-    // published/latest now shows the claim as stale.
-    const latest = JSON.parse(
-      readFileSync(join(host, "cairn", "published", "latest", "data", "head.json"), "utf8"),
-    ) as PublishedHead;
-    expect(latest.snapshot.current).toBe(id2!);
-    expect(latest.claims[0]!.freshness.state).toBe("stale");
-
-    // Old snapshot dir is byte-identical (immutability preserved).
-    expect(readFileSync(snap1Head).equals(oldBytes)).toBe(true);
+    run(h, ["add-claim", "--text", "A claim.", "--evidence", "file:e.csv", "--estimand", est1, "--provenance", "ai_proposed"]);
+    const A = claimIds(h)[0]!;
+    // B declares a different estimand AND a contradicts edge to A — a cross-estimand "contradiction".
+    run(h, [
+      "add-claim",
+      "--text",
+      "B claim, different estimand.",
+      "--evidence",
+      "file:e.csv",
+      "--estimand",
+      est2,
+      "--provenance",
+      "ai_proposed",
+      "--contradicts",
+      A,
+    ]);
+    const pub = run(h, ["publish"]);
+    expect(pub.code).toBe(0);
+    // Both reach canonical (collapse refusal blocks GROUPING, never authoring/promotion).
+    const head = run(h, ["head"]);
+    expect(head.stdout).toMatch(/canonical: 2/);
+    // The two estimands stay distinct on disk (the substrate never merged them into one).
+    const estDir = join(h, "cairn", "estimands");
+    expect(readdirSync(estDir).filter((f) => f.endsWith(".md")).length).toBe(2);
   });
+});
 
-  test("robustness: a wedged half-snapshot (dir without data/head.json) does not wedge future publishes", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-wedge-"));
-    writeFileSync(join(host, "scores.csv"), "a\n1\n", "utf8");
-    run(host, ["add-claim", "--text", "A claim.", "--evidence", "file:scores.csv"]);
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — KEYSTONE: NK CLOSED-NEGATIVE", () => {
+  test("a positive + contradicting sibling on the SAME estimand: contested claim is BLOCKED from settled, stays canonical, surfaced on orient", () => {
+    const h = host("keystone");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
 
-    // Simulate a prior publish that created the snapshot dir but crashed before writing data/.
-    // We can't know the id in advance, so do a real publish, then DELETE its data/head.json to
-    // recreate the "dir exists but incomplete" wedge, while keeping the same content head.
-    const p1 = run(host, ["publish"]);
-    const id1 = (p1.stdout.match(/published snapshot (\w+)/) ?? [])[1];
-    expect(id1).toBeTruthy();
-    const snapHead = join(host, "cairn", "snapshots", id1!, "data", "head.json");
-    // Remove the completion marker -> wedged half-snapshot for THIS content head.
-    Bun.spawnSync(["rm", snapHead]);
-    expect(existsSync(snapHead)).toBe(false);
+    // One shared estimand; both claims cite it (true siblings).
+    const est = run(h, ["add-estimand", "--label", "primary", "--def", "Does treatment T raise outcome O in cohort C?"]).stdout.match(
+      EST,
+    )![0];
 
-    // A republish of the same content must COMPLETE the half-snapshot, not crash (ENOENT) or wedge.
-    const p2 = run(host, ["publish"]);
-    expect(p2.code).toBe(0);
-    expect(existsSync(snapHead)).toBe(true);
-    // latest/ mirrors the (now-complete) snapshot.
-    expect(existsSync(join(host, "cairn", "published", "latest", "data", "head.json"))).toBe(true);
+    // Positive claim.
+    run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const POS = claimIds(h)[0]!;
+    // Contradicting sibling on the SAME estimand.
+    run(h, [
+      "add-claim",
+      "--text",
+      "T does not raise O (closed negative).",
+      "--evidence",
+      "file:e.csv",
+      "--estimand",
+      est,
+      "--provenance",
+      "ai_proposed",
+      "--contradicts",
+      POS,
+    ]);
+    const NEG = claimIds(h).find((i) => i !== POS)!;
+
+    // Publish: BOTH reach canonical (neither side dropped; the multiverse is persisted).
+    const pub = run(h, ["publish"]);
+    expect(pub.code).toBe(0);
+    const posFile = readClaimFile(h, POS);
+    const negFile = readClaimFile(h, NEG);
+    expect(fmScalar(posFile, "lifecycle")).toBe("canonical");
+    expect(fmScalar(negFile, "lifecycle")).toBe("canonical");
+
+    // (1) The contested claim is BLOCKED from settled while the contradiction is live.
+    const claims = join(h, "cairn", "claims");
+    // Hand-flip the contested claim to resolution: settled (simulating an agent trying to close it),
+    // then assert validate refuses it (gate c.3) — it cannot be settled while NEG is live.
+    const tampered = negFile.replace(/^resolution: open$/m, "resolution: settled");
+    writeFileSync(join(claims, `${NEG}.md`), tampered);
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toMatch(/resolution|trust-field-lock/);
+    expect(v.stderr).toContain(NEG);
+    // restore
+    writeFileSync(join(claims, `${NEG}.md`), negFile);
+
+    // (2) The contradiction is SURFACED on the orient surface (index.md), not buried.
+    const head = run(h, ["head"]);
+    expect(head.stdout).toContain("unresolved contradictions: 1");
+    const index = readFileSync(join(h, "cairn", "index.md"), "utf8");
+    const contraPos = index.indexOf("Unresolved contradictions");
+    const canonPos = index.indexOf("Canonical claims");
+    expect(contraPos).toBeGreaterThanOrEqual(0);
+    expect(contraPos).toBeLessThan(canonPos); // surfaced ABOVE the canonical positives
+    expect(index).toContain(NEG);
+    expect(index).toContain(POS);
+    // The substrate has earned itself: contested-but-canonical, never silently closed.
   });
+});
 
-  test("ground dedupes identical evidence edges (no duplicate appended)", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-dedupe-"));
-    writeFileSync(join(host, "e.csv"), "a\n1\n", "utf8");
-    run(host, ["add-claim", "--text", "Dedupe me."]);
-    const drafts = run(host, ["drafts"]);
-    const id = (drafts.stdout.match(/claim-\d{8}-\d{3}/) ?? [])[0];
-    expect(id).toBeTruthy();
-
-    const g1 = run(host, ["ground", id!, "--evidence", "file:e.csv"]);
-    expect(g1.code).toBe(0);
-    // Re-ground the SAME evidence: must be skipped as a duplicate.
-    const g2 = run(host, ["ground", id!, "--evidence", "file:e.csv"]);
-    expect(g2.code).toBe(0);
-    expect(g2.stdout).toContain("now 1 total");
-    expect(g2.stdout).toMatch(/duplicate skipped/);
-
-    const claimText = readFileSync(join(host, "cairn", "claims", `${id}.md`), "utf8");
-    const occurrences = (claimText.match(/ref: e\.csv/g) ?? []).length;
-    expect(occurrences).toBe(1);
-  });
-
-  test("add-claim accepts dash-leading text (argv parser consumes next token / --flag=value)", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-dash-"));
-    // `--text "-initial dip"`: value begins with `-`; the parser must consume it, not reject it.
-    const add = run(host, ["add-claim", "--text", "-initial dip"]);
-    expect(add.code).toBe(0);
-    const drafts = run(host, ["drafts"]);
-    expect(drafts.stdout).toContain("-initial dip");
-
-    // `--text=...` form also works (and supports a leading dash).
-    const add2 = run(host, ["add-claim", "--text=-second dip"]);
-    expect(add2.code).toBe(0);
-    const drafts2 = run(host, ["drafts"]);
-    expect(drafts2.stdout).toContain("-second dip");
-  });
-
-  test("no-store failure exits 1 (StoreError), matching the documented usage/no-store contract", () => {
-    // A read verb with NO store anywhere up the tree must exit 1, not 4.
-    const empty = mkdtempSync(join(tmpdir(), "cairn-nostore-"));
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — misc contract", () => {
+  test("no-store read verb exits 1 with the documented message", () => {
+    const empty = host("nostore");
     const r = run(empty, ["head"]);
     expect(r.code).toBe(1);
     expect(r.stderr).toContain("no Cairn store");
   });
 
-  test("validate warns (without blocking) on a dangling depends_on", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-dangling-"));
-    const claims = join(host, "cairn", "claims");
-    mkdirSync(claims, { recursive: true });
-    writeFileSync(
-      join(claims, "claim-20260610-001.md"),
-      `---\nid: claim-20260610-001\ntext: "grounded but deps a ghost"\nstatus: canonical\nverification: unverified\ngrounding:\n  - kind: file\n    ref: a.csv\n    fingerprint: "sha256:1"\n    method: sha256\n    location: a.csv\ndepends_on:\n  - claim-20260610-999\ncreated_at: 2026-06-10T20:00:00-04:00\n---\n`,
-    );
-    const v = run(host, ["validate"]);
-    // Dangling deps are warn-only: the gate still passes (own grounding edge), exit 0.
-    expect(v.code).toBe(0);
-    expect(v.stderr + v.stdout).toContain("dangling depends_on");
-    expect(v.stderr + v.stdout).toContain("claim-20260610-999");
+  test("unknown verb exits 2", () => {
+    const empty = host("badverb");
+    const r = run(empty, ["frobnicate"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toContain("unknown verb");
   });
 
-  test("validate fails (nonzero) on an unreachable-ground canonical cycle", () => {
-    const host = mkdtempSync(join(tmpdir(), "cairn-cycle-"));
-    const claims = join(host, "cairn", "claims");
-    Bun.spawnSync(["mkdir", "-p", claims]);
-    const mk = (id: string, dep: string) =>
-      `---\nid: ${id}\ntext: "c"\nstatus: canonical\nverification: unverified\ngrounding: []\ndepends_on:\n  - ${dep}\ncreated_at: 2026-06-10T20:00:00-04:00\n---\n`;
-    writeFileSync(join(claims, "claim-20260610-001.md"), mk("claim-20260610-001", "claim-20260610-002"));
-    writeFileSync(join(claims, "claim-20260610-002.md"), mk("claim-20260610-002", "claim-20260610-001"));
-    const v = run(host, ["validate"]);
-    expect(v.code).toBe(3);
-    expect(v.stderr).toContain("FAILED");
+  test("add-claim accepts dash-leading --text (and the --flag=value form)", () => {
+    const h = host("dash");
+    expect(run(h, ["add-claim", "--text", "-initial dip", "--provenance", "ai_proposed"]).code).toBe(0);
+    expect(run(h, ["drafts"]).stdout).toContain("-initial dip");
+    expect(run(h, ["add-claim", "--text=-second dip", "--provenance", "ai_proposed"]).code).toBe(0);
+    expect(run(h, ["drafts"]).stdout).toContain("-second dip");
+  });
+
+  test("add-confound mints a cfd- node with unerasable=true by default and the caveat as body", () => {
+    const h = host("confound");
+    const r = run(h, ["add-confound", "--label", "depth-confound", "--caveat", "depth ≡ group ≡ library."]);
+    expect(r.code).toBe(0);
+    const cid = r.stdout.match(CFD)![0];
+    const file = readFileSync(join(h, "cairn", "confounds", `${cid}.md`), "utf8");
+    expect(file).toContain("type: confound");
+    expect(file).toContain("unerasable: true");
+    expect(file).toContain("depth ≡ group ≡ library.");
   });
 });

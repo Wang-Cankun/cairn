@@ -89,7 +89,12 @@ v1 claims genuinely can be forgotten — the warn-only reconcile is the accepted
   a pipeline tool's content hash (e.g. targets) is the top tier; a self-reported remote
   `md5sum` is a lower tier; both are honest about which they are.
 - **Verification** — `unverified` / `verified` / `contradicted` / `unverifiable`. A separate
-  axis from freshness. v1 stores an honest default (`unverified`); the verify machinery is v2.
+  axis from freshness, and **territory-locked**: it means confirmation by something *independent of
+  the analysis system* (wet-lab, independent cohort). Default `unverified` — a structured, inheritable
+  warning light so `canonical` can never silently masquerade as `verified`. An **agent can never set
+  `verified`**: the CLI forbids it when provenance is agent-sourced; only a non-agent provenance
+  (experimental / human-confirmed) reaches it. Agent cross-review feeds **Corroboration**, not this
+  axis. See ADR 0006.
 - **Canonical head (`main`)** — the current agreed record. Publishing advances it.
 - **Snapshot** — an immutable, content-addressed freeze of the canonical head at one publish.
   Reruns move the head; readers see a diff against the snapshot they last saw.
@@ -99,6 +104,43 @@ v1 claims genuinely can be forgotten — the warn-only reconcile is the accepted
   script run). Demoted: it is *not* the freshness backbone (the evidence fingerprint is). When
   a pipeline tool is present it supplies a high-quality fingerprint for free; when absent,
   Cairn still works.
+- **Estimand** — the Agent's explicit declaration of the *quantity/question* a claim targets (which
+  effect, in which population, conditional on what). A **first-class structured handle**: cheap and
+  stable, because it states the Agent's own intent, which it knows while analysing. Two claims are
+  alternative specifications of one question only if they cite the same estimand; the CLI refuses to
+  collapse siblings whose declared estimands differ. Captures the load-bearing half of
+  equivalence-typing — *effect-nonequivalence* (different estimand ⇒ different question ⇒ not
+  comparable). Whether two same-estimand specs are otherwise equivalent (measurement / power) is the
+  Agent's case-by-case lens, **not** a field. The E/N/U taxonomy is an Agent reasoning lens, never an
+  enforced enum. See `docs/adr/0005-estimand-handle-no-enu-field.md`.
+- **Interpretation vs mechanism** — Cairn does **no interpretation**. Judgment (is this the same
+  estimand? is this fork genuinely arbitrary? what would *deflate* this uncertainty?) lives in the
+  **Agent** (axioms in the Skill). The **CLI** is deterministic and who-agnostic: it fingerprints,
+  validates graph structure, gates on *declared labels*, and stores — it never counts, averages,
+  scores, or infers. A verdict is interpretation, so the CLI never produces one. The dividing line
+  is interpretation-vs-mechanism, not human-vs-tool (an AI agent is a reasoner). See
+  `docs/adr/0004-no-interpretation-deterministic-substrate.md`.
+- **Durable capture** — the Agent's judgment **persists** as OKF (frontmatter *handle* + body
+  *narrative*) and is **inherited** by the next session, not re-derived. The body holds the
+  reasoning; the frontmatter handle holds the actionable status the next agent reads *without
+  re-reading prose* (the anti-re-derivation device). Both positive and contradicting claims persist;
+  corrections create versions, never silent overwrites; the orient surface must surface unresolved
+  contradictions, not bury them. Re-derivation is how an erroneous closed/negative recurs;
+  persistence + the handle block it. See ADR 0004.
+- **Asserter** — the Agent that made or last modified a claim (SEPIO's asserting Agent). Distinct
+  from **Fingerprint** (which signs an *evidence artifact*, never an agent). Stamped deterministically
+  by the CLI on every write; a modification by a different asserter creates a version, never a silent
+  overwrite. See `docs/adr/0006-verification-territory-locked-corroboration.md`.
+- **Reviewed-by** — the structured set of asserter ids that have reviewed a claim, stamped by the CLI
+  as fact. A review edge may carry narrative (why the reviewer is independent — different family,
+  etc.); the CLI carries that narrative but does **not** verify it.
+- **Corroboration** — derived (like freshness), not hand-set: `self-asserted` (one asserter) /
+  `cross-reviewed` (≥2 distinct asserter ids in **Reviewed-by**). The CLI refuses `cross-reviewed`
+  without ≥2 distinct asserter ids. A **separate axis from Verification**, deliberately *not* a rung
+  on it (a `cross-reviewed` rung on the verification axis would read as "half-verified" — a masquerade
+  Cairn forbids). Lifts a claim from one-named-asserter to two-named-asserter `canonical` — still
+  canonical, never `verified`. Ceiling: a distinct id is not independence; the CLI gates on id-count,
+  never judges true decorrelation. See ADR 0006.
 
 ## Execution & storage environment
 

@@ -1,110 +1,128 @@
 /**
- * freshness.ts — compute per-claim freshness from evidence fingerprints (ADR-0002, CONTRACTS §9).
+ * freshness.ts — compute per-claim freshness from evidence fingerprints (ADR-0002, CONTRACT §1).
  *
- * Per grounding edge: re-fingerprint by method, compare to the stamped fingerprint -> per-edge
- * state. Per-edge state:
- *   - UNKNOWN if the stamped fingerprint was "unknown" OR the artifact is now unreachable
- *     (recompute returns "unknown").
- *   - stale if the recomputed fingerprint differs from the stamp.
- *   - fresh if it matches.
+ * Freshness is DERIVED at read/refresh time and LOCKED onto the claim by the CLI; it is never
+ * hand-set. The enemy is a false `fresh`, so any uncertainty resolves DOWN to `unknown`/`stale`,
+ * never up to `fresh`.
  *
- * Claim state:
- *   - stale if ANY edge changed OR any depends_on claim is stale (cascade);
- *   - else unknown if any edge is unknown;
- *   - else fresh.
+ * Per evidence ref (one per stored Fingerprint): re-fingerprint the ref NOW (`fingerprintRef`) and
+ * compare to the stored fingerprint:
+ *   - unknown — the stored fingerprint had a null value (tier `unknown`, e.g. external:), OR the ref
+ *               is now unreachable (recompute yields tier `unknown`). Cannot prove fresh ⇒ unknown.
+ *   - stale   — reachable now, but the recomputed {tier,value} differs from the stored one (the
+ *               artifact moved/changed).
+ *   - fresh   — reachable now and the recomputed {tier,value} matches the stored one exactly.
  *
- * Tier = best tier among the claim's grounding edges (TIER_ORDER). The dependency cascade is
- * resolved to a FIXPOINT by forward-propagating staleness over the dep graph, so it is both
- * cycle-safe AND order-independent: any claim transitively reachable to a stale node becomes
- * stale even when it sits in a dependency cycle (the failure a memoized DFS short-circuiting on
- * in-progress cycle nodes silently under-reports — CONTRACTS §9).
+ * Claim self-state (combine its refs): stale if ANY ref is stale; else unknown if any ref is unknown;
+ * else fresh (a claim with zero refs has no evidence ⇒ `unknown`).
+ *
+ * Cascade (ADR-0002 "stale if any dependency is stale"): the v2 schema carries NO claim→claim
+ * dependency edge (a claim grounds only through its own evidence refs), so there is no dependency
+ * graph to traverse and the cascade is the identity on self-state. The fixpoint loop below is kept
+ * (over an empty dependency relation) so the mechanism stays correct and order-independent if a
+ * claim→claim edge is ever added: staleness only propagates TO stale, never away, so it terminates
+ * in ≤N passes even under cycles.
  */
 
-import { fingerprintByMethod, UNKNOWN } from "./fingerprint.ts";
-import { METHOD_TIER, TIER_ORDER } from "./types.ts";
+import { fingerprintRef } from "./fingerprint.ts";
 import type {
   ClaimFile,
   ClaimFrontmatter,
-  Freshness,
+  EvidenceRef,
+  Fingerprint,
   FreshnessState,
-  GroundingEdge,
-  Tier,
 } from "./types.ts";
 
-type EdgeState = FreshnessState;
-
-/** Re-fingerprint one edge and classify it vs its stamped value. */
-export function edgeState(hostRoot: string, edge: GroundingEdge, remoteHost?: string): EdgeState {
-  if (edge.fingerprint === UNKNOWN) return "unknown";
-  const current = fingerprintByMethod(hostRoot, edge.method, edge.ref, edge.location, remoteHost);
-  if (current === UNKNOWN) return "unknown";
-  return current === edge.fingerprint ? "fresh" : "stale";
+/**
+ * Classify one stored fingerprint against a freshly recomputed one for the same ref.
+ *   - stored value null (tier unknown)  ⇒ unknown (was never pinned down)
+ *   - recompute tier unknown / null     ⇒ unknown (now unreachable; never claim fresh)
+ *   - tier+value byte-equal             ⇒ fresh
+ *   - otherwise                         ⇒ stale
+ */
+function refState(stored: Fingerprint, current: Fingerprint): FreshnessState {
+  if (stored.value === null || stored.tier === "unknown") return "unknown";
+  if (current.value === null || current.tier === "unknown") return "unknown";
+  return current.tier === stored.tier && current.value === stored.value ? "fresh" : "stale";
 }
 
-/** Best (most rigorous) tier among a claim's grounding edges. Defaults to "weak" if no edges. */
-export function bestTier(grounding: GroundingEdge[]): Tier {
-  let best: Tier | null = null;
-  for (const g of grounding) {
-    const t = METHOD_TIER[g.method];
-    if (best === null || TIER_ORDER.indexOf(t) < TIER_ORDER.indexOf(best)) best = t;
-  }
-  return best ?? "weak";
-}
-
-/** Combine edge states into the claim's own (pre-cascade) state. */
-function selfState(edgeStates: EdgeState[]): FreshnessState {
-  if (edgeStates.some((s) => s === "stale")) return "stale";
-  if (edgeStates.some((s) => s === "unknown")) return "unknown";
+/** Combine ref states into the claim's own (pre-cascade) state. */
+function selfState(refStates: FreshnessState[]): FreshnessState {
+  if (refStates.length === 0) return "unknown"; // no evidence ⇒ cannot be fresh
+  if (refStates.some((s) => s === "stale")) return "stale";
+  if (refStates.some((s) => s === "unknown")) return "unknown";
   return "fresh";
 }
 
 /**
- * Compute freshness for ALL given claims, with cycle-safe dependency cascade.
+ * Re-fingerprint every evidence ref of a claim and classify each against the stored fingerprint of
+ * the same ref. Refs are matched to stored fingerprints by `ref` string (the stable handle). A ref
+ * with no stored fingerprint is treated as `unknown` (never stamped ⇒ cannot be proven fresh).
+ */
+function claimRefStates(
+  fm: ClaimFrontmatter,
+  hostRoot: string,
+  as_of: string,
+  remoteHost?: string,
+): FreshnessState[] {
+  const stored = new Map<string, Fingerprint>();
+  for (const f of fm.fingerprints) stored.set(f.ref, f);
+
+  const states: FreshnessState[] = [];
+  for (const line of fm.evidence_lines) {
+    for (const ref of line.refs) {
+      const s = stored.get(ref.ref);
+      if (s === undefined) {
+        states.push("unknown");
+        continue;
+      }
+      const current = fingerprintRef(hostRoot, ref as EvidenceRef, as_of, remoteHost);
+      states.push(refState(s, current));
+    }
+  }
+  return states;
+}
+
+/**
+ * Compute freshness for ALL given claims (ADR-0002). Returns a Map id → FreshnessState (the bare v2
+ * enum; the tier/timestamp object of v1 is gone). `as_of` is the recompute timestamp passed to
+ * `fingerprintRef` for any newly-taken fingerprints; it is not stored on the result (freshness is a
+ * bare enum on the claim now).
  *
- * Returns a Map id -> Freshness. `as_of` is stamped on every entry. Only claims present in
- * `claims` participate in the cascade; a depends_on pointing outside the set is ignored for
- * cascade purposes (it cannot make a claim stale on its own).
+ * Self-state is computed per claim from its evidence refs, then the dependency cascade is resolved to
+ * a fixpoint (currently a no-op — see module header — since v2 has no claim→claim dependency edge).
  */
 export function computeFreshness(
   claims: ClaimFile[],
   hostRoot: string,
   as_of: string,
   remoteHost?: string,
-): Map<string, Freshness> {
-  const byId = new Map<string, ClaimFrontmatter>();
-  for (const c of claims) byId.set(c.frontmatter.id, c.frontmatter);
-
-  // Pre-compute each claim's own (pre-cascade) state + tier from its edges.
+): Map<string, FreshnessState> {
+  // Pre-compute each claim's own (pre-cascade) self-state from its evidence refs.
   const own = new Map<string, FreshnessState>();
-  const tiers = new Map<string, Tier>();
   for (const c of claims) {
     const fm = c.frontmatter;
-    const states = fm.grounding.map((e) => edgeState(hostRoot, e, remoteHost));
-    own.set(fm.id, selfState(states));
-    tiers.set(fm.id, bestTier(fm.grounding));
+    own.set(fm.id, selfState(claimRefStates(fm, hostRoot, as_of, remoteHost)));
   }
 
-  // Resolve the cascade to a FIXPOINT (CONTRACTS §9: "stale if any depends_on is stale, cascade").
-  // We forward-propagate staleness over the dependency graph rather than a memoized DFS that
-  // short-circuits on in-progress cycle nodes (that under-reports: a claim in a dep cycle that
-  // transitively depends on a stale node could be silently reported fresh, and order-dependently).
-  //
-  // Start from each claim's own pre-cascade state, then repeatedly: any claim whose own state is
-  // not already stale becomes stale if ANY of its in-set depends_on is stale. Iterate until a full
-  // pass makes no change. Monotone (states only move TO stale, never away), so it terminates in at
-  // most N passes regardless of cycles. Non-stale states (fresh/unknown) keep their own value —
-  // cascade only propagates stale (the enemy is a false `fresh`, never a false `stale`).
+  // Resolve the dependency cascade to a fixpoint. The v2 claim handle has no claim→claim dependency
+  // field, so `dependsOn` is empty for every claim and this loop converges immediately on self-state.
+  // Kept for forward-compatibility and to make the "stale propagates, never reverses" property
+  // explicit and cycle-safe.
+  const dependsOn = (_fm: ClaimFrontmatter): readonly string[] => [];
+
   const resolved = new Map<string, FreshnessState>();
   for (const c of claims) resolved.set(c.frontmatter.id, own.get(c.frontmatter.id) ?? "unknown");
+  const inSet = new Set(claims.map((c) => c.frontmatter.id));
 
   let changed = true;
   while (changed) {
     changed = false;
     for (const c of claims) {
       const id = c.frontmatter.id;
-      if (resolved.get(id) === "stale") continue; // already stale; cannot move further
-      for (const dep of c.frontmatter.depends_on) {
-        if (!byId.has(dep)) continue; // out-of-set dep can't make us stale on its own
+      if (resolved.get(id) === "stale") continue; // monotone: cannot move further
+      for (const dep of dependsOn(c.frontmatter)) {
+        if (!inSet.has(dep)) continue; // out-of-set dep cannot make us stale on its own
         if (resolved.get(dep) === "stale") {
           resolved.set(id, "stale");
           changed = true;
@@ -114,10 +132,5 @@ export function computeFreshness(
     }
   }
 
-  const out = new Map<string, Freshness>();
-  for (const c of claims) {
-    const id = c.frontmatter.id;
-    out.set(id, { state: resolved.get(id) ?? "unknown", tier: tiers.get(id) ?? "weak", as_of });
-  }
-  return out;
+  return resolved;
 }

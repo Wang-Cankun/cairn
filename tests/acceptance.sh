@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
-# tests/acceptance.sh — full Cairn v1 end-to-end loop against a temp copy of the demo project.
+# tests/acceptance.sh — full Cairn v2 end-to-end loop at the CLI seam against a self-contained temp
+# host (no demo fixture, no site/dist — v2 snapshots are plain OKF bundles, the React site is retired).
 #
-# Exercises: add-claim (target-grounded, file-grounded, dep+file-grounded), a leftover zero-edge
-# draft, validate, publish (promote 3 + report leftover), canonical-only head.json, snapshot +
-# share-link integrity, a mutation -> refresh -> stale cascade, and a FRESHNESS-ONLY second publish
-# (no change to the canonical set) that — under Option X (freshness is part of snapshot identity) —
-# still produces a NEW immutable snapshot id, mirrors the corrected `stale` freshness into
-# published/latest/, and leaves the first snapshot byte-identical. Plus a negative reach-ground gate
-# test. Exits NONZERO on the first failed assertion.
-#
-# Requires: the site bundle prebuilt at site/dist (run `bun run build:site` first).
+# Exercises, all through the real CLI: authoring (estimand + grounded/ungrounded claims), the
+# trust-field lock (a supplied verified is overridden), validate gates (reach-ground, verification
+# territory-lock, resolution), corroboration via different-asserter review, freshness fresh→stale on
+# mutation, a canonical-only publish bundle + log.md time spine, snapshot immutability + reproducible
+# id, and the KEYSTONE NK CLOSED-NEGATIVE shape (contested-but-canonical, contradiction surfaced).
+# Exits NONZERO on the first failed assertion.
 
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLI="$REPO/src/cli.ts"
-DEMO="$REPO/fixtures/demo-project"
 PASS=0
 FAIL=0
 
@@ -24,168 +21,192 @@ die()  { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); echo; echo "ACCEPTANCE FAILED ($
 
 # cairn <args...> run inside the temp host (cwd = host root so store discovery walks up correctly).
 cairn() { ( cd "$HOST" && bun run "$CLI" "$@" ); }
-
-# --- 0. prerequisites -------------------------------------------------------------
-[ -f "$REPO/site/dist/index.html" ] || die "site bundle missing (run: bun run build:site)"
-[ -d "$DEMO" ] || die "demo project missing at $DEMO"
+# first id of a given kind currently on disk
+firstid() { ls "$HOST/cairn/$1" 2>/dev/null | sed -n '1p' | sed 's/\.md$//'; }
+fmval() { # fmval <claim-id> <key> -> the top-level scalar from the claim frontmatter
+  sed -n '/^---$/,/^---$/p' "$HOST/cairn/claims/$1.md" | sed -n "s/^$2: \\(.*\\)$/\\1/p" | tail -1
+}
 
 HOST="$(mktemp -d "${TMPDIR:-/tmp}/cairn-acc-XXXXXX")"
 trap 'rm -rf "$HOST"' EXIT
-cp -R "$DEMO/." "$HOST/"
 echo "acceptance host: $HOST"
 echo
 
 # ==================================================================================
-echo "[1] author claims"
-# c1: target-grounded
-cairn add-claim --text "Treatment scores exceed control in step 07." --evidence target:scores_step_07 >/dev/null \
-  || die "add-claim c1 (target) nonzero exit"
-# c2: file-grounded
-cairn add-claim --text "Model metrics report AUC 0.93." --evidence file:outputs/model_metrics.json >/dev/null \
-  || die "add-claim c2 (file) nonzero exit"
-# discover the actual allocated ids (per-day counter)
-C1="$(ls "$HOST/cairn/claims" | sed -n '1p' | sed 's/\.md$//')"
-C2="$(ls "$HOST/cairn/claims" | sed -n '2p' | sed 's/\.md$//')"
-[ -n "$C1" ] && [ -n "$C2" ] || die "could not resolve claim ids C1/C2"
-# c3: depends on c2 AND file-grounded (own grounding edge so it is promotable per §6.3)
-cairn add-claim --text "Step 07 scores corroborate the model's separation." \
-  --evidence file:outputs/step07_scores.csv --depends-on "$C2" >/dev/null \
-  || die "add-claim c3 (dep+file) nonzero exit"
-C3="$(ls "$HOST/cairn/claims" | sed -n '3p' | sed 's/\.md$//')"
-# c4: leftover zero-edge draft (no grounding, no deps) -> must NOT promote, must be reported
-cairn add-claim --text "Loose hunch, not yet grounded." >/dev/null \
-  || die "add-claim c4 (zero-edge draft) nonzero exit"
-C4="$(ls "$HOST/cairn/claims" | sed -n '4p' | sed 's/\.md$//')"
-pass "authored 4 drafts: $C1 (target), $C2 (file), $C3 (dep+file), $C4 (zero-edge)"
+echo "[1] author an estimand + a grounded claim citing it"
+printf 'a,b\n1,2\n' > "$HOST/scores.csv"
+EST="$(cairn add-estimand --def "Does treatment T raise outcome O in cohort C?" | sed -n 's/^\(est-[0-9a-f]*\)$/\1/p' | head -1)"
+[ -n "$EST" ] || die "add-estimand did not print an est- id"
+cairn add-claim --text "T raises O." --evidence file:scores.csv --estimand "$EST" \
+  --provenance ai_proposed --as author-A >/dev/null || die "add-claim (grounded) nonzero exit"
+C1="$(firstid claims)"
+[ -n "$C1" ] || die "could not resolve grounded claim id"
+[ "$(fmval "$C1" lifecycle)" = "draft" ] || die "new claim must be a draft"
+[ "$(fmval "$C1" reach_ground)" = "true" ] || die "grounded claim must have reach_ground:true"
+[ "$(fmval "$C1" freshness)" = "fresh" ] || die "claim on a present local file must be fresh"
+[ "$(fmval "$C1" corroboration)" = "self-asserted" ] || die "new claim must be self-asserted"
+pass "estimand $EST + grounded draft $C1 (fresh, self-asserted, reach_ground=true)"
 
 # ==================================================================================
-echo "[2] validate passes (3 grounded candidates reach ground; zero-edge ignored)"
-cairn validate >/dev/null 2>&1 || die "validate should pass with 3 grounded candidates"
+echo "[2] trust-field lock: a supplied verified/corroboration is OVERRIDDEN by the CLI"
+cairn add-claim --text "I tried to self-stamp trust." --evidence file:scores.csv \
+  --provenance ai_proposed --verification verified --corroboration cross-reviewed >/dev/null \
+  || die "add-claim (self-stamp attempt) nonzero exit"
+C2="$(ls "$HOST/cairn/claims" | sed -n '2p' | sed 's/\.md$//')"
+[ -n "$C2" ] || die "could not resolve self-stamp claim id"
+[ "$(fmval "$C2" verification)" = "unverified" ] || die "supplied verified must be overridden to unverified (ai_proposed)"
+[ "$(fmval "$C2" corroboration)" = "self-asserted" ] || die "supplied cross-reviewed must be overridden to self-asserted"
+pass "self-stamped verified/cross-reviewed discarded → unverified/self-asserted"
+
+# ==================================================================================
+echo "[3] validate passes with grounded candidates"
+cairn validate >/dev/null 2>&1 || die "validate should pass (grounded candidates, no gate violations)"
 pass "validate exit 0"
 
 # ==================================================================================
-echo "[3] first publish"
-PUB1="$(cairn publish 2>&1)" || die "publish #1 nonzero exit:\n$PUB1"
-echo "$PUB1" | grep -q "promoted draft->canonical: 3" || die "publish #1 should promote exactly 3 (got: $(echo "$PUB1" | grep promoted))"
-# leftover zero-edge draft must be reported as ungrounded
-echo "$PUB1" | grep -q "$C4" || die "publish #1 should report leftover ungrounded draft $C4"
-SNAP1="$(echo "$PUB1" | sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p')"
-[ -n "$SNAP1" ] || die "could not parse snapshot id from publish #1"
-pass "publish #1 promoted 3, reported leftover $C4, snapshot=$SNAP1"
+echo "[4] corroboration rises only on TWO different-asserter reviews"
+cairn review "$C1" --by author-A >/dev/null || die "self-review nonzero exit"
+[ "$(fmval "$C1" corroboration)" = "self-asserted" ] || die "self-review must NOT raise corroboration"
+cairn review "$C1" --by reviewer-B --note "independent" >/dev/null || die "review B nonzero"
+[ "$(fmval "$C1" corroboration)" = "self-asserted" ] || die "one distinct reviewer is not enough"
+cairn review "$C1" --by reviewer-C >/dev/null || die "review C nonzero"
+[ "$(fmval "$C1" corroboration)" = "cross-reviewed" ] || die "two distinct reviewers ≠ author → cross-reviewed"
+[ "$(fmval "$C1" verification)" = "unverified" ] || die "corroboration is a separate axis; verification must stay unverified"
+pass "self-review ignored; 2 distinct reviewers → cross-reviewed (verification still unverified)"
 
 # ==================================================================================
-echo "[4] head.json: exactly 3 canonical, all fresh, ZERO drafts (decision A)"
-HEAD="$HOST/cairn/head.json"
-[ -f "$HEAD" ] || die "cairn/head.json missing"
-NCLAIM="$(bun -e 'const h=require(process.argv[1]);console.log(h.claims.length)' "$HEAD")"
-[ "$NCLAIM" = "3" ] || die "head.json should have 3 canonical claims, got $NCLAIM"
-NFRESH="$(bun -e 'const h=require(process.argv[1]);console.log(h.claims.filter(c=>c.freshness.state==="fresh").length)' "$HEAD")"
-[ "$NFRESH" = "3" ] || die "all 3 head claims should be fresh, got $NFRESH"
-# no drafts, not even a count, and no leftover draft id present
-bun -e 'const h=require(process.argv[1]);if("drafts"in h||JSON.stringify(h).includes(process.argv[2]))process.exit(1)' "$HEAD" "$C4" \
-  || die "head.json must not contain drafts/draft-count nor the leftover draft id $C4"
-pass "head.json = 3 canonical, all fresh, canonical-only (no drafts)"
+echo "[5] verification territory-lock gate: experimental+verified OK, ai_proposed+verified FAILS"
+VHOST="$(mktemp -d "${TMPDIR:-/tmp}/cairn-vlock-XXXXXX")"
+mkdir -p "$VHOST/cairn/claims"
+printf 'x\n1\n' > "$VHOST/e.csv"
+mkclaim() { # mkclaim <dir> <id> <provenance> <verification>
+  cat > "$1/cairn/claims/$2.md" <<EOF
+---
+type: claim
+text: claim $2
+evidence_lines:
+  - name: evidence
+    refs:
+      - kind: file
+        ref: e.csv
+depends_on_fork: []
+contradicts: []
+inherits_caveat: []
+provenance: $3
+id: $2
+asserter:
+  who: a
+  model: m
+  session: s
+  time: 2026-06-10T20:00:00-04:00
+reviewed_by: []
+corroboration: self-asserted
+fingerprints: []
+freshness: unknown
+reach_ground: true
+lifecycle: canonical
+resolution: open
+verification: $4
+---
+body
+EOF
+}
+mkclaim "$VHOST" clm-eeee00000001 experimental verified
+( cd "$VHOST" && bun run "$CLI" validate ) >/dev/null 2>&1 || die "experimental+verified should PASS validate"
+mkclaim "$VHOST" clm-ffff00000002 ai_proposed verified
+VOUT="$( ( cd "$VHOST" && bun run "$CLI" validate ) 2>&1 )"; VCODE=$?
+[ "$VCODE" = "3" ] || die "ai_proposed+verified should FAIL validate (exit 3), got $VCODE"
+grep -q "verification-lock" <<<"$VOUT" || die "failure must name the verification-lock gate"
+grep -q "clm-ffff00000002" <<<"$VOUT" || die "failure must name the ai_proposed offender"
+grep -q "clm-eeee00000001" <<<"$VOUT" && die "the experimental claim must NOT be flagged"
+rm -rf "$VHOST"
+pass "experimental+verified passes; ai_proposed+verified fails (exit 3, gate + offender named)"
 
 # ==================================================================================
-echo "[5] snapshot dir contains index.html + data/head.json (site wired, decision F)"
-SNAPDIR="$HOST/cairn/snapshots/$SNAP1"
-[ -f "$SNAPDIR/index.html" ] || die "snapshot missing index.html"
-[ -f "$SNAPDIR/data/head.json" ] || die "snapshot missing data/head.json"
-[ -d "$SNAPDIR/assets" ] || die "snapshot missing assets/ (real bundle, not placeholder)"
-# the snapshot's head.json data must be the REAL published head (3 canonical), not dev fixtures
-SNAPN="$(bun -e 'const h=require(process.argv[1]);console.log(h.claims.length)' "$SNAPDIR/data/head.json")"
-[ "$SNAPN" = "3" ] || die "snapshot data/head.json should have 3 claims (dev fixtures not overwritten?), got $SNAPN"
-pass "snapshot self-contained: index.html + assets/ + real data/head.json"
-
-# ==================================================================================
-echo "[6] published/latest/ mirrors newest snapshot exactly (decision B)"
-LATEST="$HOST/cairn/published/latest"
-[ -f "$LATEST/data/head.json" ] || die "published/latest/data/head.json missing"
-diff -q "$LATEST/data/head.json" "$SNAPDIR/data/head.json" >/dev/null \
-  || die "latest/data/head.json should match newest snapshot data/head.json"
-pass "published/latest mirrors snapshot $SNAP1"
-
-# ==================================================================================
-echo "[7] mutate evidence -> refresh -> c2-dependent + c2 read stale"
-# Mutate the step07 csv that c3 grounds on.
-echo "S07,treatment,0.99" >> "$HOST/outputs/step07_scores.csv"
+echo "[6] freshness: mutate the grounded artifact → refresh → stale"
+printf 'a,b\n1,2\nMUTATED,9\n' > "$HOST/scores.csv"
 REFRESH="$(cairn refresh 2>&1)" || die "refresh nonzero exit"
-# c3 grounds on step07_scores.csv -> must be stale now
-echo "$REFRESH" | grep -q "$C3" && echo "$REFRESH" | grep "$C3" | grep -q "stale" \
-  || die "c3 ($C3) should read stale after mutating its evidence:\n$REFRESH"
-# head.json (rewritten by refresh) must reflect the stale state
-C3STATE="$(bun -e 'const h=require(process.argv[1]);const c=h.claims.find(c=>c.id===process.argv[2]);console.log(c?c.freshness.state:"MISSING")' "$HEAD" "$C3")"
-[ "$C3STATE" = "stale" ] || die "head.json should show $C3 stale after refresh, got $C3STATE"
-pass "after mutation+refresh: $C3 stale, head.json reflects it"
+grep "$C1" <<<"$REFRESH" | grep -q stale || die "$C1 should read stale after mutating its evidence:\n$REFRESH"
+[ "$(fmval "$C1" freshness)" = "stale" ] || die "claim file must record freshness:stale after refresh"
+pass "artifact mutation + refresh → $C1 stale (no false fresh)"
 
 # ==================================================================================
-echo "[8] second publish: freshness-only change -> NEW snapshot id, latest shows stale, old snapshot immutable"
-# capture old snapshot bytes for immutability check
-OLD_HEAD_BYTES="$(shasum "$SNAPDIR/data/head.json" | awk '{print $1}')"
-# Option X: the snapshot id hashes the published VIEW INCLUDING computed freshness (timestamps
-# excluded). The artifact mutation in [7] + refresh made c3 genuinely stale, so a plain publish #2
-# (NO new grounding, NO change to the canonical SET) must still produce a NEW snapshot id — the
-# corrected freshness reaches the share link instead of the old `fresh` badge being re-copied.
-PUB2="$(cairn publish 2>&1)" || die "publish #2 nonzero exit:\n$PUB2"
-SNAP2="$(echo "$PUB2" | sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p')"
-[ -n "$SNAP2" ] || die "could not parse snapshot id from publish #2"
-[ "$SNAP2" != "$SNAP1" ] || die "publish #2 snapshot id should DIFFER from #1 (freshness changed the published view)"
-echo "$PUB2" | grep -q "reused" && die "publish #2 must NOT hit the reused branch (freshness changed)"
-SNAPDIR2="$HOST/cairn/snapshots/$SNAP2"
-# diff.json of the NEW snapshot reports the freshness change against SNAP1
-DIFF2="$SNAPDIR2/data/diff.json"
-AGAINST="$(bun -e 'const d=require(process.argv[1]);console.log(d.against)' "$DIFF2")"
-[ "$AGAINST" = "$SNAP1" ] || die "diff #2 should be against $SNAP1, got $AGAINST"
-NFC="$(bun -e 'const d=require(process.argv[1]);console.log(d.counts.freshness_changed)' "$DIFF2")"
-[ "$NFC" -ge 1 ] || die "diff #2 should report >=1 freshness_changed, got $NFC"
-# published/latest shows the previously-fresh, now-mutated claim c3 as STALE (honest freshness
-# reached the collaborator — the whole point of the fix).
-C3LATEST="$(bun -e 'const h=require(process.argv[1]);const c=h.claims.find(c=>c.id===process.argv[2]);console.log(c?c.freshness.state:"MISSING")' "$LATEST/data/head.json" "$C3")"
-[ "$C3LATEST" = "stale" ] || die "published/latest should show $C3 as stale, got $C3LATEST"
-# old snapshot dir byte-identical (immutability)
-NEW_HEAD_BYTES="$(shasum "$SNAPDIR/data/head.json" | awk '{print $1}')"
-[ "$OLD_HEAD_BYTES" = "$NEW_HEAD_BYTES" ] || die "old snapshot $SNAP1 data/head.json was mutated (immutability violated)"
-# latest/ now mirrors the NEW snapshot
-diff -q "$LATEST/data/head.json" "$SNAPDIR2/data/head.json" >/dev/null \
-  || die "published/latest should now mirror NEW snapshot $SNAP2"
-diff -q "$LATEST/data/head.json" "$SNAPDIR/data/head.json" >/dev/null \
-  && die "published/latest should NOT still mirror old snapshot $SNAP1"
-pass "publish #2: freshness-only change -> new snapshot $SNAP2, latest shows $C3 stale, freshness_changed=$NFC vs $SNAP1, old snapshot immutable"
+echo "[7] first publish: canonical-only OKF bundle + log.md time spine"
+PUB1="$(cairn publish 2>&1)" || die "publish #1 nonzero exit:\n$PUB1"
+grep -q "published snapshot" <<<"$PUB1" || die "publish #1 missing 'published snapshot'"
+SNAP1="$(sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p' <<<"$PUB1")"
+[ -n "$SNAP1" ] || die "could not parse snapshot id from publish #1"
+SNAPDIR="$HOST/cairn/snapshots/$SNAP1"
+for sub in claims estimands confounds index.md head.json; do
+  [ -e "$SNAPDIR/$sub" ] || die "snapshot bundle missing $sub"
+done
+# Retired v1 artifacts must NOT appear.
+[ ! -d "$SNAPDIR/assets" ] || die "snapshot must not contain a React assets/ dir (v1 retired)"
+[ ! -d "$SNAPDIR/data" ] || die "snapshot must not contain a data/ dir (v1 retired)"
+[ ! -d "$HOST/cairn/published" ] || die "v2 must not emit published/latest/ (v1 retired)"
+# The referenced estimand was carried into the bundle by reference.
+[ -f "$SNAPDIR/estimands/$EST.md" ] || die "referenced estimand $EST not carried into the bundle"
+# log.md records the publish on the append-only time spine.
+grep -q "^- publish $SNAP1" "$HOST/cairn/log.md" || die "log.md missing publish entry for $SNAP1"
+pass "publish #1 froze canonical-only OKF bundle $SNAP1 + appended log.md diff entry"
 
 # ==================================================================================
-echo "[9] negative: a canonical claim depending only on an ungrounded draft FAILS validate"
-NEG="$(mktemp -d "${TMPDIR:-/tmp}/cairn-neg-XXXXXX")"
-mkdir -p "$NEG/cairn/claims"
-# ungrounded draft (no edges)
-cat > "$NEG/cairn/claims/claim-20260610-001.md" <<'EOF'
----
-id: claim-20260610-001
-text: "ungrounded base draft"
-status: draft
-verification: unverified
-grounding: []
-depends_on: []
-created_at: 2026-06-10T20:00:00-04:00
----
-EOF
-# canonical candidate that can only reach ground via the ungrounded draft -> cannot reach ground
-cat > "$NEG/cairn/claims/claim-20260610-002.md" <<'EOF'
----
-id: claim-20260610-002
-text: "rests only on an ungrounded draft"
-status: canonical
-verification: unverified
-grounding: []
-depends_on:
-  - claim-20260610-001
-created_at: 2026-06-10T20:00:00-04:00
----
-EOF
-NEGOUT="$( ( cd "$NEG" && bun run "$CLI" validate ) 2>&1 )"; NEGCODE=$?
-rm -rf "$NEG"
-[ "$NEGCODE" = "3" ] || die "negative validate should exit 3 (iron rule), got $NEGCODE"
-echo "$NEGOUT" | grep -q "claim-20260610-002" || die "negative validate should name the offender claim-20260610-002"
-pass "edge-bearing candidate whose dep chain can't reach ground FAILS validate (exit 3, offender named)"
+echo "[8] reproducible id + immutability: re-publish reuses; a freshness-only change yields a NEW id"
+OLD_BYTES="$(shasum "$SNAPDIR/head.json" | awk '{print $1}')"
+PUB1B="$(cairn publish 2>&1)" || die "republish nonzero exit"
+SNAP1B="$(sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p' <<<"$PUB1B")"
+[ "$SNAP1B" = "$SNAP1" ] || die "no-change republish must reuse the same id ($SNAP1 vs $SNAP1B)"
+grep -q reused <<<"$PUB1B" || die "no-change republish must report 'reused'"
+# A genuine freshness STATE transition flips the view → a new id. C1 entered [8] stale (from [6]);
+# restoring the artifact to its EXACT original baseline bytes makes C1 fresh again (refresh never
+# re-baselines), so the published view changes stale→fresh and the id must differ.
+printf 'a,b\n1,2\n' > "$HOST/scores.csv"
+cairn refresh >/dev/null || die "refresh #2 nonzero exit"
+[ "$(fmval "$C1" freshness)" = "fresh" ] || die "restoring the baseline bytes should make $C1 fresh again"
+PUB2="$(cairn publish 2>&1)" || die "publish #2 nonzero exit"
+SNAP2="$(sed -n 's/^published snapshot \([0-9a-f]*\).*/\1/p' <<<"$PUB2")"
+[ -n "$SNAP2" ] && [ "$SNAP2" != "$SNAP1" ] || die "freshness change must yield a NEW snapshot id (got $SNAP2 vs $SNAP1)"
+grep -q reused <<<"$PUB2" && die "publish #2 must NOT hit the reused branch"
+NEW_BYTES="$(shasum "$SNAPDIR/head.json" | awk '{print $1}')"
+[ "$OLD_BYTES" = "$NEW_BYTES" ] || die "old snapshot $SNAP1 head.json was mutated (immutability violated)"
+pass "republish reused $SNAP1; freshness-only change → new $SNAP2; old snapshot byte-identical"
+
+# ==================================================================================
+echo "[9] KEYSTONE: NK CLOSED-NEGATIVE — contested-but-canonical, blocked from settled, surfaced"
+KS="$(mktemp -d "${TMPDIR:-/tmp}/cairn-keystone-XXXXXX")"
+( cd "$KS"
+  printf 'x\n1\n' > e.csv
+  KEST="$(bun run "$CLI" add-estimand --def "Does T raise O?" | sed -n 's/^\(est-[0-9a-f]*\)$/\1/p' | head -1)"
+  bun run "$CLI" add-claim --text "T raises O." --evidence file:e.csv --estimand "$KEST" --provenance ai_proposed >/dev/null
+  POS="$(ls cairn/claims | sed -n '1p' | sed 's/\.md$//')"
+  bun run "$CLI" add-claim --text "T does not raise O." --evidence file:e.csv --estimand "$KEST" \
+    --provenance ai_proposed --contradicts "$POS" >/dev/null
+  NEG="$(ls cairn/claims | grep -v "$POS" | sed -n '1p' | sed 's/\.md$//')"
+  bun run "$CLI" publish >/dev/null || { echo "KEYSTONE publish failed"; exit 1; }
+  echo "$POS $NEG $KEST"
+) > "$KS/keystone.out" 2>/dev/null || die "keystone setup failed"
+read -r KPOS KNEG KEST2 < "$KS/keystone.out"
+[ -n "$KPOS" ] && [ -n "$KNEG" ] || die "could not resolve keystone claim ids"
+# Both sides reached canonical (neither dropped; the multiverse is persisted).
+grep -q "^lifecycle: canonical" "$KS/cairn/claims/$KPOS.md" || die "positive claim must be canonical"
+grep -q "^lifecycle: canonical" "$KS/cairn/claims/$KNEG.md" || die "contesting claim must be canonical"
+# (1) Flipping the contesting claim to settled (while the contradiction is live) FAILS validate (c.3).
+sed -i.bak 's/^resolution: open$/resolution: settled/' "$KS/cairn/claims/$KNEG.md"
+KOUT="$( ( cd "$KS" && bun run "$CLI" validate ) 2>&1 )"; KCODE=$?
+[ "$KCODE" = "3" ] || die "settled-while-contested must FAIL validate (exit 3), got $KCODE"
+grep -Eq "resolution|trust-field-lock" <<<"$KOUT" || die "failure must name the resolution gate"
+grep -q "$KNEG" <<<"$KOUT" || die "failure must name the contested claim $KNEG"
+mv "$KS/cairn/claims/$KNEG.md.bak" "$KS/cairn/claims/$KNEG.md"
+# (2) The contradiction is SURFACED on the orient surface, above the canonical positives.
+( cd "$KS" && bun run "$CLI" head ) | grep -q "unresolved contradictions: 1" || die "head must report 1 unresolved contradiction"
+INDEX="$KS/cairn/index.md"
+CONTRA_LINE="$(grep -n 'Unresolved contradictions' "$INDEX" | head -1 | cut -d: -f1)"
+CANON_LINE="$(grep -n 'Canonical claims' "$INDEX" | head -1 | cut -d: -f1)"
+[ -n "$CONTRA_LINE" ] && [ -n "$CANON_LINE" ] || die "index.md missing contradiction/canonical sections"
+[ "$CONTRA_LINE" -lt "$CANON_LINE" ] || die "contradictions must be surfaced ABOVE the canonical positives"
+grep -q "$KNEG" "$INDEX" || die "index.md must name the contesting claim"
+rm -rf "$KS"
+pass "NK CLOSED-NEGATIVE reproduced: both canonical, contested blocked from settled, contradiction surfaced"
 
 # ==================================================================================
 echo

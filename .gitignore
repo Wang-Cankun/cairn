@@ -21,3 +21,6 @@ venv/
 
 # OMC session state
 .omc/
+
+# reference papers (PDFs — kept out of git to avoid binary bloat; not source of truth)
+docs/ref/

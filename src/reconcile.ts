@@ -1,28 +1,34 @@
 /**
- * reconcile.ts — the warn-only reconcile (CONTRACTS §7, CONTEXT enforcement model).
+ * reconcile.ts — the warn-only reconcile (spec §(e) `reconcile`, CONTEXT enforcement model).
  *
- * Never blocks publish. Two parts:
- *   1. If config.findings_globs is set: scan those host-root-relative files for conclusion-like
- *      lines that carry NO `claim-…` id reference; report the count (terse file:line list).
- *      Absent config -> "not configured".
- *   2. ALWAYS list the ungrounded drafts (zero-edge drafts).
+ * NEVER blocks publish — it makes lapses VISIBLE without pretending prevention. Two parts:
+ *   1. If config.findings_globs is set: scan those host-root-relative files for conclusion-like lines
+ *      that carry NO `clm-…` claim-id reference; report them (terse "<relpath>:<lineno>" list).
+ *      Absent config ⇒ "not configured".
+ *   2. ALWAYS list ungrounded drafts (drafts with no evidence ref) — ungrounded threads stay visible,
+ *      not silently rotting (ADR-0001).
  *
- * Detecting a "conclusion" is fuzzy by design; this is a heuristic count, not a gate.
+ * Detecting a "conclusion" is fuzzy by design; this is a heuristic count, not a gate. The CLI never
+ * acts on it beyond reporting.
  */
 
 import { Glob } from "bun";
 import { existsSync, readFileSync } from "node:fs";
+import { isGrounded } from "./claimfile.ts";
+import { ID_PREFIX } from "./types.ts";
 import type { CairnConfig, ClaimFile } from "./types.ts";
 
-const CLAIM_ID_RE = /claim-\d{8}-\d{3}/;
+/** A v2 claim-id reference: `clm-<hex>` (collision-extension tolerant). */
+const CLAIM_ID_RE = new RegExp(`${ID_PREFIX.claim}[0-9a-f]+`);
 // Conclusion-like heuristic: lines asserting a finding. Intentionally loose.
-const CONCLUSION_RE = /\b(we (found|conclude|show|observe)|therefore|conclusion|results? (show|indicate))\b/i;
+const CONCLUSION_RE =
+  /\b(we (found|conclude|show|observe)|therefore|conclusion|results? (show|indicate))\b/i;
 
 export interface ReconcileReport {
   configured: boolean;
   /** Conclusion-like lines lacking a claim id: "<relpath>:<lineno>". */
   unreferenced: string[];
-  /** Ids of zero-edge (ungrounded) drafts. */
+  /** Ids of ungrounded drafts (drafts with no evidence ref). */
   ungroundedDrafts: string[];
 }
 
@@ -32,7 +38,7 @@ export function reconcile(
   claims: ClaimFile[],
 ): ReconcileReport {
   const ungroundedDrafts = claims
-    .filter((c) => c.frontmatter.status === "draft" && c.frontmatter.grounding.length === 0)
+    .filter((c) => c.frontmatter.lifecycle === "draft" && !isGrounded(c.frontmatter))
     .map((c) => c.frontmatter.id)
     .sort();
 
