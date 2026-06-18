@@ -4,13 +4,26 @@
 
 > A **deterministic, anti-laundering substrate** for AI-driven analysis. Cairn records an agent's conclusions as versioned **claims** that carry their evidence, conditions, contradictions, and freshness — and enforces consistency without ever interpreting, scoring, or deciding for you.
 
-A *cairn* is a stack of stones earlier walkers leave on a trail so those who follow know the way. Cairn does that for analysis: your next AI session — or a collaborator — inherits an honest, grounded record instead of re-deriving it, or trusting a laundered one.
+A *cairn* is a stack of stones earlier walkers leave on a trail so those who follow know the way. Cairn does that for analysis: your next AI session — or a collaborator — inherits an honest, grounded record instead of re-deriving it, or trusting a polished one.
 
 ## Why
 
-As a conclusion travels up the stack (artifact → claim → summary → result) and across agents and months, it gets **laundered**: the fork it was conditional on, the result that contradicted it, the fact that nobody verified it — all quietly drop, leaving a clean-looking answer. Cairn's single job is to keep conclusions scarred. It does **no interpretation** — no counting paths, no averaging, no verdicts. Judgment stays with the agent; the tool enforces only what it can check deterministically.
+A conclusion rarely arrives as a clean fact. It was conditional on the one analysis path you happened to take — maybe contradicted by another you didn't report; its data may have changed since; nobody may have checked it against the real world. As it travels up the stack (artifact → claim → summary → result) and across agents and months, those qualifiers quietly fall away, and a tentative finding ends up looking certain. Call that **laundering**.
 
-The full reasoning — verifier asymmetry, `canonical ≠ verified`, the multiverse — is in the **[whitebook](docs/WHITEBOOK.md)** ([PDF](https://github.com/Wang-Cankun/cairn/releases/latest)).
+Cairn's one job is to stop it. It does **no interpretation** — it never counts paths, averages effects, or hands you a verdict. Judgment stays with you (or your agent); the tool only records what you declared and enforces what it can check deterministically. The full reasoning is in the **[whitebook](docs/WHITEBOOK.md)** ([PDF](https://github.com/Wang-Cankun/cairn/releases/latest)).
+
+## What it solves
+
+Six ways a conclusion gets distorted on its way into a finding — and what Cairn does about each:
+
+| The trap | Cairn's answer |
+|---|---|
+| **Forking paths** — the same data supports many reasonable analyses, and you quietly pick one | each claim records the fork it's conditional on (`depends_on_fork`) |
+| **Apples to oranges** — results compare only if they answer the *same question* | declare the `estimand` first; the CLI refuses to merge claims that don't share one |
+| **Lost caveats** — an unfixable confound dies in a footnote and never reaches the reader | confounds are first-class nodes, inherited by every downstream claim |
+| **Buried contradictions** — a contradicted result quietly "closes" as settled | contradictions persist; a contested claim can never be marked settled |
+| **Re-derivation** — a fresh session re-makes an error that was already refuted | judgment is captured durably and inherited, not re-derived from scratch |
+| **Hoarded uncertainty** — doubt gets flagged but is never given an exit | every residual carries a *deflation route*: what would actually shrink it |
 
 ## Install
 
@@ -33,14 +46,13 @@ Cairn is driven by an AI agent through four touchpoints (the [skill](skill/cairn
 
 Full verb set: `head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · migrate`.
 
-## The model
+## How it works
 
-- **No interpretation** — the CLI fingerprints, validates graph structure, and gates; it never counts, averages, scores, or emits a verdict. ([ADR 0004](docs/adr/0004-no-interpretation-deterministic-substrate.md))
-- **[OKF](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)-native** — claims, estimands, and confounds are markdown + frontmatter concept files; bytes stay by reference; published snapshots are portable OKF bundles.
-- **estimand is the handle** — two claims are comparable only if they declare the same estimand id; the CLI matches ids, never meaning. ([ADR 0005](docs/adr/0005-estimand-handle-no-enu-field.md))
-- **Five deterministic gates** — reach-ground · collapse-refusal · resolution (a contested claim can't settle) · verification territory-lock (an agent can never set `verified`) · corroboration (no self-review). ([ADR 0006](docs/adr/0006-verification-territory-locked-corroboration.md))
-- **Freshness from fingerprints**, not from the process — `fresh` / `stale` / `unknown`, where `unknown` is an honest state. ([ADR 0002](docs/adr/0002-freshness-by-evidence-fingerprint.md))
-- **An honest ceiling** — Cairn enforces *consistency with what was declared*, never *truth of the declaration*. `canonical ≠ verified`, always.
+- **No interpretation** — the CLI fingerprints, validates graph structure, and gates; it never counts, averages, scores, or emits a verdict. Judgment lives with the agent. ([ADR 0004](docs/adr/0004-no-interpretation-deterministic-substrate.md))
+- **`canonical ≠ verified`** — being the agreed current record is not being true. An agent can never set `verified`; only confirmation from outside the analysis (a wet-lab result, an independent cohort) can. ([ADR 0006](docs/adr/0006-verification-territory-locked-corroboration.md))
+- **Freshness from fingerprints**, not from the process — `fresh` / `stale` / `unknown`, where `unknown` is an honest state, not a failure. ([ADR 0002](docs/adr/0002-freshness-by-evidence-fingerprint.md))
+- **[OKF](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)-native** — claims, estimands, and confounds are markdown + frontmatter files; bytes stay by reference; published snapshots are portable OKF bundles.
+- **The honest ceiling** — Cairn enforces *consistency with what you declared*, never *truth of the declaration*. It can't stop you mis-declaring; it makes the record honest, not correct.
 
 ## Docs
 
