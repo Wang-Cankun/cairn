@@ -21,3 +21,7 @@ venv/
 
 # OMC session state
 .omc/
+docs/chat/
+docs/WHITEBOOK.pdf
+docs/ARCHITECTURE-as-built.html
+docs/ref/
