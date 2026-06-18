@@ -1,117 +1,56 @@
 # Cairn
 
-A read-only **canonical projection of a claim graph** for sharing analysis results.
+[![release](https://img.shields.io/github/v/release/Wang-Cankun/cairn?sort=semver)](https://github.com/Wang-Cankun/cairn/releases) ![bun](https://img.shields.io/badge/bun-%E2%89%A51.3-black)
 
-> A cairn is a stack of stones earlier walkers ground into the trail so those who come
-> after know where the path is. This is the same idea for analysis results: a canonical,
-> grounded record that two later readers — a collaborator, and your next AI session —
-> can rely on without re-deriving the whole history.
+> A **deterministic, anti-laundering substrate** for AI-driven analysis. Cairn records an agent's conclusions as versioned **claims** that carry their evidence, conditions, contradictions, and freshness — and enforces consistency without ever interpreting, scoring, or deciding for you.
 
-## Quickstart
+A *cairn* is a stack of stones earlier walkers leave on a trail so those who follow know the way. Cairn does that for analysis: your next AI session — or a collaborator — inherits an honest, grounded record instead of re-deriving it, or trusting a laundered one.
 
-Cairn v1 is implemented: a `bun` + TypeScript CLI (the sole writer), a derived in-memory SQLite
-index, a portable React snapshot site, and the agent skill. Requires **bun ≥ 1.3** (never
-npm/npx/node).
+## Why
 
-```sh
-bun install                 # root deps (yaml + bun-types)
-bun run build:site          # build the static viewer ONCE -> site/dist (publish copies this in)
-```
+As a conclusion travels up the stack (artifact → claim → summary → result) and across agents and months, it gets **laundered**: the fork it was conditional on, the result that contradicted it, the fact that nobody verified it — all quietly drop, leaving a clean-looking answer. Cairn's single job is to keep conclusions scarred. It does **no interpretation** — no counting paths, no averaging, no verdicts. Judgment stays with the agent; the tool enforces only what it can check deterministically.
 
-The CLI walks up from cwd to find a `cairn/` store (auto-created on first write — there is no
-`init`). All evidence paths are **host-root-relative** (the dir containing `cairn/`). Run it with
-`bun run src/cli.ts <verb>` (or `bun run cairn <verb>`).
+The full reasoning — verifier asymmetry, `canonical ≠ verified`, the multiverse — is in the **[whitebook](docs/WHITEBOOK.md)** ([PDF](https://github.com/Wang-Cankun/cairn/releases/latest)).
 
-### The 8 verbs
-
-| Verb | What it does |
-|---|---|
-| `cairn head` | Print the local orient view — canonical claims (with **live** freshness + verification) + pending drafts — and (re)write `cairn/head.json`. The session-start orient step. |
-| `cairn add-claim --text "…" [--evidence kind:ref …] [--depends-on id …]` | Write a new **draft** claim. Each `--evidence` is fingerprinted now (`file`→sha256, `target`→pipeline-meta, `external`→remote-md5). Flags repeatable. |
-| `cairn ground <id> --evidence kind:ref` | Attach + stamp a grounding edge onto an existing draft. |
-| `cairn refresh` | Recompute freshness for canonical claims by re-fingerprinting reachable artifacts (unreachable → `unknown`); surface newly-stale claims. Run after a rerun / `tar_make()`. |
-| `cairn validate` | Rebuild the index, run the reach-ground (iron-rule) gate; nonzero exit naming any claim that can't reach ground (incl. cycles). |
-| `cairn publish` | Gate → promote grounded drafts → freeze an immutable `snapshots/<id>/` (prebuilt site + `data/`) → refresh the stable `published/latest/` share link → warn-only reconcile. |
-| `cairn drafts` | List pending drafts; ungrounded ones flagged. |
-| `cairn status` | Store path, #canonical / #drafts / #ungrounded, last snapshot id. |
-
-### Publish & share (decisions A, B, F)
-
-`publish` writes an immutable, content-addressed `cairn/snapshots/<id>/` (the prebuilt static
-viewer + `data/head.json` + `data/diff.json`, **canonical claims only — no drafts**) and refreshes
-`cairn/published/latest/`, a full COPY of the newest snapshot. Share the `latest/` path **once**;
-it always shows the newest publish. Every snapshot opens from a plain `file://` path or any static
-host, including a nested sub-path (all asset/data references are relative).
-
-### The agent skill
-
-The skill (`skill/cairn/SKILL.md`) is the agent's 4-touchpoint protocol (orient → author →
-refresh → publish). Install it for Claude Code by symlinking:
+## Install
 
 ```sh
-ln -s "$(pwd)/skill/cairn" ~/.claude/skills/cairn
+bun install   # bun ≥ 1.3 — never npm/node
 ```
 
-### Run the demo / tests
+The CLI walks up from the cwd to find (or auto-create) a `cairn/` store. Invoke it with `bun run cairn <verb>`.
+
+## The agent loop
+
+Cairn is driven by an AI agent through four touchpoints (the [skill](skill/cairn/SKILL.md)):
+
+| Step | Verb | |
+|---|---|---|
+| **Orient** | `cairn head` | read canonical claims, live freshness, and unresolved contradictions before acting |
+| **Author** | `cairn add-claim --text "…" --evidence kind:ref` | record a conclusion with its estimand, evidence, the fork it depends on, and what it contradicts |
+| **Refresh** | `cairn refresh` | re-fingerprint artifacts; surface newly-stale claims |
+| **Publish** | `cairn validate` → `cairn publish` | gate, then freeze an immutable OKF bundle |
+
+Full verb set: `head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · migrate`.
+
+## The model
+
+- **No interpretation** — the CLI fingerprints, validates graph structure, and gates; it never counts, averages, scores, or emits a verdict. ([ADR 0004](docs/adr/0004-no-interpretation-deterministic-substrate.md))
+- **[OKF](https://cloud.google.com/blog/products/data-analytics/how-the-open-knowledge-format-can-improve-data-sharing/)-native** — claims, estimands, and confounds are markdown + frontmatter concept files; bytes stay by reference; published snapshots are portable OKF bundles.
+- **estimand is the handle** — two claims are comparable only if they declare the same estimand id; the CLI matches ids, never meaning. ([ADR 0005](docs/adr/0005-estimand-handle-no-enu-field.md))
+- **Five deterministic gates** — reach-ground · collapse-refusal · resolution (a contested claim can't settle) · verification territory-lock (an agent can never set `verified`) · corroboration (no self-review). ([ADR 0006](docs/adr/0006-verification-territory-locked-corroboration.md))
+- **Freshness from fingerprints**, not from the process — `fresh` / `stale` / `unknown`, where `unknown` is an honest state. ([ADR 0002](docs/adr/0002-freshness-by-evidence-fingerprint.md))
+- **An honest ceiling** — Cairn enforces *consistency with what was declared*, never *truth of the declaration*. `canonical ≠ verified`, always.
+
+## Docs
+
+- **[Whitebook](docs/WHITEBOOK.md)** — the canonical *why + what* (PDF on the [latest release](https://github.com/Wang-Cankun/cairn/releases/latest)).
+- **[CONTEXT.md](CONTEXT.md)** — glossary and current decisions (authoritative).
+- **[docs/adr/](docs/adr/)** — the resolved design forks, ADR 0001–0006.
+
+## Develop
 
 ```sh
-bun test                    # unit + CLI integration tests
-bun run build:site          # required before acceptance (publish copies site/dist)
-bun run acceptance          # full v1 loop against a temp copy of fixtures/demo-project
+bun test            # unit + CLI integration
+bun run acceptance  # end-to-end loop against fixtures
 ```
-
-`bun run acceptance` exercises the whole loop end to end: author 4 drafts (target-grounded,
-file-grounded, dependency+file-grounded, plus one zero-edge leftover), validate, publish (promotes
-3, reports the leftover), assert canonical-only `head.json`, mutate evidence → refresh → stale
-cascade, re-publish with a real diff + immutable prior snapshot + `latest/` mirroring the new one,
-and a negative reach-ground gate test.
-
-## What it is (one paragraph)
-
-Instead of zipping results and mailing them, you publish them as **claims**. A claim is a
-single conclusion that carries an explicit link to the evidence it stands on. The published
-version is the canonical record (`main`); a collaborator opens a read-only link, and a fresh
-AI session reads the same canonical head to instantly know "where we are and what to decide
-next." The unit shared is a claim, not a file — that one change is what makes this not a
-generic document/notes tool.
-
-## What it is NOT
-
-- Not a SaaS, not a collaboration platform, not real-time synced.
-- Not a place where "I published it" means "it is verified/true." Publishing makes a version
-  *canonical* (the agreed current record), never *verified*. Those are separate axes.
-
-## The whole v1, in three rules
-
-1. **Every claim must reach the ground.** A claim has ≥1 edge, and following dependency edges
-   upward must terminate at a real artifact (a dataset / run / file) — no claim may rest only on
-   other claims. Drafts may be ungrounded while you work; the rule bites at the **promotion gate**
-   to canonical, so nothing ungrounded is ever shared.
-2. **Freshness is derived from the evidence fingerprint, not typed.** `fresh` / `stale` /
-   `unknown` is computed by comparing the artifact's fingerprint to what was stamped at
-   authoring — never hand-set, never AI-guessed. `unknown` (artifact unreachable) is a legal,
-   honest state.
-3. **Each publish is an immutable snapshot.** The head moves forward; reruns cascade staleness;
-   a reader sees what changed since the version they last saw.
-
-## How to use this repo
-
-Below is the design brief behind the implementation. Read order (later docs win where they differ):
-
-1. `CONTEXT.md` — glossary + the canonical, current decisions. **Authoritative.**
-2. `docs/adr/` — the resolved design forks (0001 draft authoring, 0002 evidence-fingerprint
-   freshness, 0003 files-in-git truth). **Authoritative.**
-3. `docs/BUILD-BRIEF.md` — the concrete, buildable spec + acceptance test (reflects the ADRs).
-4. `docs/DESIGN.md` — background reasoning. Largely valid, but where it predates the ADRs
-   (freshness mechanism; storage), the ADRs and `CONTEXT.md` win.
-
-Then start a fresh session and point the model at `docs/BUILD-BRIEF.md` to scaffold v1.
-
-The acceptance test is in the build brief: publish one real project's results as a few
-claims, share a read-only link, and check that (a) a collaborator reads it and (b) a fresh
-session fed only the canonical head answers "where are we / what next" correctly.
-
-## System card
-
-For the long-form "why" — the narrative that explains and ties together the decisions above for
-human collaborators and fresh AI sessions — see [`system-card/README.md`](system-card/README.md).
