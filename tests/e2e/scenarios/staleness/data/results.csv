@@ -1,0 +1,3 @@
+group,n,mean_response,p_value
+treated,48,12.4,0.012
+control,47,9.1,0.012

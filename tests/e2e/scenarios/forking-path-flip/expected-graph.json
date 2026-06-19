@@ -1,0 +1,27 @@
+{
+  "scenario": "forking-path-flip",
+  "description": "Two justified normalizations flip the sign for ONE estimand; a faithful store keeps both claims + the contradicts edge between them.",
+  "claims": [
+    {
+      "key": "cpm-positive",
+      "text_contains": "CPM normalization",
+      "estimand_key": "marker-effect",
+      "contradicts": ["medratio-negative"],
+      "evidence": [{ "kind": "file", "ref_contains": "effect_cpm.csv" }],
+      "freshness": "fresh",
+      "verification": "unverified",
+      "lifecycle": "canonical"
+    },
+    {
+      "key": "medratio-negative",
+      "text_contains": "median-of-ratios normalization",
+      "estimand_key": "marker-effect",
+      "evidence": [{ "kind": "file", "ref_contains": "effect_medratio.csv" }],
+      "freshness": "fresh",
+      "verification": "unverified",
+      "lifecycle": "canonical"
+    }
+  ],
+  "confounds": [],
+  "reconcile": { "min_unreferenced": null, "max_unreferenced": null }
+}

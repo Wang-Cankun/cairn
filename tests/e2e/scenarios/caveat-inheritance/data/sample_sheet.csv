@@ -1,0 +1,9 @@
+sample_id,group,seq_batch
+S01,treated,batchA
+S02,treated,batchA
+S03,treated,batchA
+S04,treated,batchA
+S05,control,batchB
+S06,control,batchB
+S07,control,batchB
+S08,control,batchB

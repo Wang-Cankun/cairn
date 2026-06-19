@@ -500,7 +500,8 @@ export type GateId =
   | "resolution" // c.3, ADR-0001 extension
   | "verification-lock" // c.4, ADR-0006 Gate A
   | "corroboration" // c.5, ADR-0006 Gate B
-  | "trust-field-lock"; // c.6, ADR-0004 (meta-gate)
+  | "trust-field-lock" // c.6, ADR-0004 (meta-gate)
+  | "referential-integrity"; // cited estimand / inherited confound node must EXIST (publish/validate, fs)
 
 /** One gate violation: which gate, which offending node/edge, and a human message. */
 export interface GateViolation {

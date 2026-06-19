@@ -5,8 +5,39 @@ sole writer and walks up from the cwd to find the store.
 
 ## Verbs
 
-`head` · `drafts` · `status` · `add-estimand` · `add-claim` · `add-confound` · `review` ·
+`init` · `head` · `drafts` · `status` · `add-estimand` · `add-claim` · `add-confound` · `review` ·
 `refresh` · `validate` · `publish` · `reconcile` · `migrate`
+
+## Global invocation (call `cairn` from any project)
+
+The package ships a `bin.cairn` entry, so once, on the machine, link it to put `cairn` on `PATH`:
+
+```
+bun link            # run in the cairn repo root → registers the `cairn` bin globally
+```
+
+Now `cairn <verb>` works from inside any host project; the CLI walks up from the cwd to find the
+`cairn/` store. If you prefer not to link, a one-line wrapper does the same:
+
+```
+#!/usr/bin/env bash
+exec bun run /abs/path/to/cairn/src/cli.ts "$@"   # drop on PATH as `cairn`
+```
+
+(The package is `private`; this is local linking, not publishing.)
+
+## Scaffolding a project
+
+```
+cairn init \
+  --findings <glob> \      # repeatable; the shared findings/paper files reconcile scans (default FINDINGS.md)
+  --remote-host <host> \   # optional ssh alias for remote fingerprinting of dvc/remote refs
+  --dvc                    # optional: run `dvc init` if dvc is on PATH (non-fatal, never required)
+```
+
+Stands up the store skeleton (`claims/ estimands/ confounds/ snapshots/`) + `index.md` + `log.md`, and
+writes `config.json` **only if absent**. Idempotent: re-running never overwrites an existing config or
+any claim.
 
 ## Authoring
 

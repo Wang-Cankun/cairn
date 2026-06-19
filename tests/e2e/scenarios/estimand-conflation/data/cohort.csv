@@ -1,0 +1,13 @@
+patient_id,stage,arm,outcome
+p01,early,treatment,1
+p02,early,control,0
+p03,late,treatment,1
+p04,late,control,0
+p05,early,treatment,1
+p06,early,control,1
+p07,late,treatment,0
+p08,late,control,0
+p09,early,treatment,1
+p10,late,control,1
+p11,early,control,0
+p12,late,treatment,1

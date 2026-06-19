@@ -1,0 +1,7 @@
+{
+  "cohort": "PBMC-2026Q1",
+  "condition": "LPS-stimulated vs unstimulated",
+  "n_samples": 12,
+  "platform": "bulk RNA-seq",
+  "validated_externally": false
+}

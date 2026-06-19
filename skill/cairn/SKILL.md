@@ -58,6 +58,13 @@ store. Full verb/flag detail and worked examples: [`REFERENCE.md`](REFERENCE.md)
 
 ## The four touchpoints
 
+### 0. SCAFFOLD — first use, if there is no `cairn/` store yet
+`cairn init` makes a project Cairn-ready: it stands up the store skeleton and writes a `config.json`
+naming the shared findings to reconcile against (`--findings <glob>`, repeatable; `--remote-host <host>`
+for remote fingerprinting). It is idempotent and **never** clobbers an existing config or any claim, so
+running it on an already-initialized project is safe. Skip straight to ORIENT when a store already exists.
+**Done when:** `cairn/` exists with a config listing the findings globs your conclusions will land in.
+
 ### 1. ORIENT — at session start
 `cairn head`, then `cairn drafts` and `cairn status`. Read the **surfaced** contradictions and
 staleness *first* — they are not buried under the positives.
@@ -75,8 +82,9 @@ evidence, the fork it depends on, and any claim it contradicts.
 
 ### 3. REFRESH — after any rerun
 `cairn refresh` after `tar_make()`, a re-run pipeline, regenerated outputs, or a re-fit model. It
-re-fingerprints reachable artifacts, cascades staleness through dependency edges, and re-reads `dvc:`
-md5s; an unreachable remote reads `unknown`.
+re-fingerprints reachable artifacts and re-reads `dvc:` md5s, then re-locks each claim's freshness from
+its own evidence refs — a claim grounds only through its own evidence, the v2 schema has **no
+claim→claim dependency edge**, so there is no cascade to walk; an unreachable remote reads `unknown`.
 **Done when:** you have named the newly-stale claims to the user so they can re-verify or re-author.
 
 ### 4. PUBLISH — before sharing

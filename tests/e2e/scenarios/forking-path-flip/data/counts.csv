@@ -1,0 +1,9 @@
+sample,group,libsize,marker_raw
+ctrl_1,control,1010000,420
+ctrl_2,control,995000,455
+ctrl_3,control,1230000,470
+ctrl_4,control,1180000,480
+trt_1,treated,512000,300
+trt_2,treated,498000,315
+trt_3,treated,2050000,690
+trt_4,treated,1990000,705

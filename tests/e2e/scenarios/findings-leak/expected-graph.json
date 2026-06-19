@@ -1,0 +1,21 @@
+{
+  "scenario": "findings-leak",
+  "description": "Conclusions in FINDINGS.md must carry a claim id; the reference agent grounds them so reconcile is clean, the naive agent leaks them ungrounded so reconcile flags them.",
+  "claims": [
+    {
+      "key": "score-gap",
+      "text_contains": "treatment samples score markedly higher",
+      "estimand_key": "score-gap-est",
+      "evidence": [{ "kind": "file", "ref_contains": "scores.csv" }],
+      "lifecycle": "canonical"
+    },
+    {
+      "key": "model-separation",
+      "text_contains": "separates the two groups with high AUC",
+      "estimand_key": "separation-est",
+      "evidence": [{ "kind": "file", "ref_contains": "model_metrics.json" }],
+      "lifecycle": "canonical"
+    }
+  ],
+  "reconcile": { "min_unreferenced": 0, "max_unreferenced": 0 }
+}

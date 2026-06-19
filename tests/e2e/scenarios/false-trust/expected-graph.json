@@ -1,0 +1,16 @@
+{
+  "scenario": "false-trust",
+  "description": "An ai_proposed DE finding must stay verification=unverified; a forged verified is rejected by cairn validate.",
+  "claims": [
+    {
+      "key": "il6_up",
+      "text_contains": "IL6 is up-regulated by LPS",
+      "estimand_key": "lps_effect_on_il6",
+      "evidence": [{ "kind": "file", "ref_contains": "de_results.csv" }],
+      "freshness": "fresh",
+      "verification": "unverified",
+      "lifecycle": "draft"
+    }
+  ],
+  "reconcile": { "min_unreferenced": null, "max_unreferenced": null }
+}

@@ -6,8 +6,8 @@
  * OVERRIDING any agent-supplied value (trust-field lock, ADR-0004). An agent can never self-stamp a
  * trust badge. All interpretation lives in the Skill, not here.
  *
- * Verbs: head, add-claim, add-estimand, add-confound, review, refresh, validate, publish, drafts,
- *        status, reconcile, migrate (+ --version / --help).
+ * Verbs: init, head, add-claim, add-estimand, add-confound, review, refresh, validate, publish,
+ *        drafts, status, reconcile, migrate (+ --version / --help).
  *
  * Exit codes:
  *   0 ok · 1 usage/no-store · 2 unknown verb/bad args · 3 validate/publish gate failed · 4 runtime err
@@ -23,7 +23,7 @@ import { stampFingerprints } from "./fingerprint.ts";
 import { isGrounded } from "./claimfile.ts";
 import { buildOrientSurface, canonicalFrontmatter, toPublishedClaim } from "./snapshot.ts";
 import { renderIndexMd } from "./render.ts";
-import { publish, PublishError } from "./publish.ts";
+import { publish, PublishError, referentialIntegrityViolations } from "./publish.ts";
 import { reconcile } from "./reconcile.ts";
 import {
   appendLog,
@@ -43,6 +43,7 @@ import {
 import { EVIDENCE_KINDS, PROVENANCES } from "./types.ts";
 import type {
   Asserter,
+  CairnConfig,
   ClaimFile,
   ClaimFrontmatter,
   ConfoundFrontmatter,
@@ -59,6 +60,7 @@ import type {
 } from "./types.ts";
 
 const VERBS = [
+  "init",
   "head",
   "add-claim",
   "add-estimand",
@@ -87,7 +89,7 @@ interface Parsed {
 }
 
 /** Flags whose presence is a boolean toggle (no value consumed). */
-const BOOL_FLAGS = new Set(["unerasable"]);
+const BOOL_FLAGS = new Set(["unerasable", "dvc"]);
 
 function parseArgs(argv: string[]): Parsed {
   const positionals: string[] = [];
@@ -453,12 +455,18 @@ function cmdRefresh(paths: StorePaths, parsed: Parsed): void {
 function cmdValidate(paths: StorePaths): void {
   const claims = readAllClaims(paths);
   const gate = runGate(claims);
-  if (gate.ok) {
-    console.log(`validate: OK — ${gate.candidateIds.length} grounded draft(s) would promote, no violations`);
+  // Combine the pure gate suite with referential integrity (cited estimand / inherited confound nodes
+  // must exist) so `cairn validate` is the same precondition publish enforces — not a weaker one.
+  const violations = [...gate.violations, ...referentialIntegrityViolations(paths, claims)];
+  if (violations.length === 0) {
+    console.log(
+      `validate: OK — ${gate.candidateIds.length} grounded draft(s) would promote, no violations ` +
+        `(gates + referential integrity)`,
+    );
     process.exit(0);
   }
-  console.error(`validate: FAILED — ${gate.violations.length} gate violation(s):`);
-  for (const v of gate.violations) console.error(`  [${v.gate}] ${v.claim}: ${v.message}`);
+  console.error(`validate: FAILED — ${violations.length} gate violation(s):`);
+  for (const v of violations) console.error(`  [${v.gate}] ${v.claim}: ${v.message}`);
   process.exit(3);
 }
 
@@ -558,6 +566,58 @@ function cmdReconcile(paths: StorePaths, parsed: Parsed): void {
 }
 
 /**
+ * init — scaffold a Cairn-ready store at cwd: the OKF skeleton (claims/estimands/confounds/snapshots),
+ * a config.json (only if absent — NEVER clobbered), and a self-describing index.md/log.md, exactly like
+ * migrate emits them. Idempotent: re-running creates nothing it didn't already, and never touches an
+ * existing config or any claim. Flags:
+ *   --findings <glob>   (repeatable) → config.findings_globs (default ["FINDINGS.md"] when none given)
+ *   --remote-host <h>   → config.remote_host (ssh alias for remote fingerprinting)
+ *   --dvc               → run `dvc init` if the binary is on PATH (non-fatal: warn + continue otherwise)
+ */
+function cmdInit(paths: StorePaths, parsed: Parsed): void {
+  const time = isoNow();
+  // resolveStoreForWrite already stood up claims/estimands/confounds/snapshots (idempotent skeleton).
+  const created: string[] = [];
+
+  // config.json is written ONLY IF ABSENT — an existing config is the owner's and is never overwritten.
+  if (!existsSync(paths.configPath)) {
+    const findings_globs = parsed.flags.findings ?? ["FINDINGS.md"];
+    const remote_host = first(parsed, "remote-host");
+    const config: CairnConfig = { findings_globs, ...(remote_host ? { remote_host } : {}) };
+    writeFileSync(paths.configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+    created.push(paths.configPath);
+  }
+
+  // Emit a self-describing empty orient surface + log header (lazily, exactly like migrate).
+  if (!existsSync(paths.indexPath)) {
+    writeFileSync(paths.indexPath, renderIndexMd({ canonical: [], contradictions: [], stale: [] }, time), "utf8");
+    created.push(paths.indexPath);
+  }
+  const logExisted = existsSync(paths.logPath);
+
+  // Optional DVC init — convenience only, NEVER a hard requirement. Missing/failing dvc warns and
+  // continues, so a project without DVC initializes fine (its evidence is file:/external: refs).
+  if (parsed.bools.has("dvc")) {
+    if (spawnSync("dvc", ["--version"], { stdio: "ignore" }).status === 0) {
+      const res = spawnSync("dvc", ["init"], { cwd: paths.hostRoot, encoding: "utf8" });
+      if (res.status !== 0) console.warn("note: `dvc init` failed (continuing without DVC)");
+      else console.log("dvc: initialized");
+    } else {
+      console.warn("note: --dvc given but `dvc` is not on PATH (continuing without DVC)");
+    }
+  }
+
+  appendLog(paths, `- init at ${time} (skeleton ready${created.length ? "; created " + created.length + " file(s)" : "; already initialized"})`);
+
+  console.log(`init: Cairn store ready at ${paths.storeDir}`);
+  console.log(`  dirs:   ${["claims", "estimands", "confounds", "snapshots"].join(", ")}/`);
+  console.log(`  config: ${paths.configPath}${created.includes(paths.configPath) ? "" : " (kept existing)"}`);
+  console.log(`  index:  ${paths.indexPath}`);
+  console.log(`  log:    ${paths.logPath}${logExisted ? "" : " (created)"}`);
+  console.log(`  next: cairn add-estimand … ; cairn add-claim --estimand … --provenance …`);
+}
+
+/**
  * migrate --from <v1-store> — strip a v1 claim store to the new OKF skeleton. v1 claim files use a
  * fundamentally different schema (date-counter ids, grounding edges, no estimand/confound nodes); a
  * faithful field-by-field port would silently fabricate estimands and provenance. So v2 migration is
@@ -639,6 +699,9 @@ function main(): void {
 
   try {
     switch (verb) {
+      case "init":
+        cmdInit(resolveStoreForWrite(), parsed);
+        return;
       case "add-claim":
         cmdAddClaim(resolveStoreForWrite(), parsed);
         return;

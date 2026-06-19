@@ -1,0 +1,16 @@
+{
+  "scenario": "staleness",
+  "description": "A claim grounded on results.csv goes stale after the pipeline regenerates that output; only the agent that refreshes records freshness:stale.",
+  "claims": [
+    {
+      "key": "effect",
+      "text_contains": "Treated mean response exceeds control",
+      "estimand_key": "treatment_effect",
+      "evidence": [{ "kind": "file", "ref_contains": "results.csv" }],
+      "freshness": "stale",
+      "lifecycle": "draft"
+    }
+  ],
+  "confounds": [],
+  "reconcile": null
+}

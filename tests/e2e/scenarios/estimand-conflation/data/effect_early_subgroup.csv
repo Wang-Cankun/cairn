@@ -1,0 +1,2 @@
+contrast,n,risk_diff,ci_low,ci_high
+treatment_vs_control_early_only,6,0.50,0.10,0.90

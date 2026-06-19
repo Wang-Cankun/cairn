@@ -1,9 +1,16 @@
 # PRD 0001 — Cairn v2: the deterministic anti-laundering substrate over OKF
 
-Status: ready-for-agent · 2026-06-18
+Status: superseded-in-part by PRD 0002 · 2026-06-18
 Respects: ADR 0001 (soft authoring, + resolution axis), 0002 (freshness by fingerprint, + DVC tier),
 0003 (text-in-git truth, reframed onto OKF), 0004 (no interpretation), 0005 (estimand handle),
 0006 (verification territory-lock, corroboration).
+
+> **Superseded by [PRD 0002](0002-contract-mechanism-gaps.md) where they disagree.** PRD 0002 closed
+> four contract↔mechanism gaps that changed two facts stated below: (1) `human_reviewed` was **removed**
+> from `Provenance` entirely — a human *reviewing* an analysis is consensus (`reviewed_by`/corroboration),
+> not territory, so **only `experimental`** reaches `verified`/`contradicted`; and (2) freshness carries
+> **no claim→claim cascade** (the v2 schema has no claim→claim dependency edge — a claim grounds only
+> through its own evidence). Read any `human_reviewed` or "cascade" mention below as historical.
 
 ## Problem Statement
 
@@ -75,8 +82,9 @@ viewer ride on OKF; Cairn adds only the resistance layer.
     `unknown` for tracked data.
 14. As an analysis owner, I want freshness to read `unknown` honestly when a remote artifact is
     unreachable, so that I am never given false confidence.
-15. As an analysis owner, I want staleness to cascade through dependency edges, so that when an
-    upstream artifact changes, every conclusion resting on it is flagged.
+15. As an analysis owner, I want a changed artifact to flag every conclusion resting on it as stale.
+    *(Reframed in PRD 0002: the v2 schema has no claim→claim dependency edge — a claim grounds only
+    through its own evidence refs, so staleness is a per-claim recompute, NOT a cascade.)*
 16. As an analysis owner, I want every claim to satisfy the iron rule (reach the ground) before it
     becomes canonical, so that no conclusion rests only on other conclusions.
 17. As an agent, I want the CLI to stamp who asserted (and last modified) each claim, so that
@@ -146,8 +154,8 @@ viewer ride on OKF; Cairn adds only the resistance layer.
 **Claim frontmatter — agent-asserted handles** (cheap; the Agent's own intent/knowledge): `text`,
 `estimand` (id ref), `evidence_lines` (each a named line with artifact refs, refs may be
 `file:` / `external:` / `dvc:`), `depends_on_fork` (axis=choice), `contradicts` (claim-id refs),
-`inherits_caveat` (confound-id refs), `provenance` (`ai_proposed` / `human_reviewed` / `literature` /
-`experimental`), `deflation_route` (narrative pointer), plus the markdown body.
+`inherits_caveat` (confound-id refs), `provenance` (`ai_proposed` / `literature` / `experimental` —
+`human_reviewed` removed in PRD 0002), `deflation_route` (narrative pointer), plus the markdown body.
 
 **Claim frontmatter — CLI-computed/stamped (locked; agent values overridden, ADR 0004):** `id`,
 `asserter` (who/model/session/time), `reviewed_by` (asserter-id set), `corroboration`
@@ -163,8 +171,8 @@ viewer ride on OKF; Cairn adds only the resistance layer.
 - Resolution gate: refuse `settled` while any `contradicts` edge is unresolved (ADR 0001 extension —
   resolution is a new axis orthogonal to lifecycle; a contested claim may stay `canonical` but not
   `settled`).
-- Verification territory-lock: refuse `verified` when `provenance` is agent-sourced; only
-  `experimental` / `human_reviewed` can reach it (ADR 0006, Gate A).
+- Verification territory-lock: refuse `verified`/`contradicted` when `provenance` is not territory;
+  only `experimental` can reach them (ADR 0006, Gate A; PRD 0002 removed the `human_reviewed` path).
 - Corroboration: refuse `cross-reviewed` without ≥2 distinct asserter-id review edges (ADR 0006,
   Gate B). Corroboration is a separate axis, never a rung on verification.
 - Trust-field lock: the CLI overrides any agent-supplied value for a computed field.
@@ -182,7 +190,7 @@ schema and gates. `publish` freezes an immutable OKF snapshot bundle (canonical 
 **Modules to modify** (existing seams preferred): `types` (new schema, node types, axes);
 `claimfile` (read/write OKF concept files for claim/estimand/confound; frontmatter handle vs body
 discipline); `fingerprint` (add `dvc:` source reading the `.dvc` md5 as top tier; ADR 0002);
-`freshness` (cascade over `evidence_lines`, unchanged in spirit); `gate` (add the new gates above,
+`freshness` (per-claim recompute over `evidence_lines`, no claim→claim cascade — PRD 0002); `gate` (add the new gates above,
 keep reach-ground); `cli` (verb signatures, asserter stamping, locked-field computation); `store`
 (OKF-bundle layout: `claims/`, `estimands/`, `confounds/`, `index.md`, `log.md`, `snapshots/`);
 `snapshot`/`publish` (emit OKF bundle + `log.md`; drop React site copy); `reconcile` (warn-only,
@@ -201,7 +209,7 @@ axioms.
   `settled` while a `contradicts` edge is unresolved; collapse is refused across differing estimand
   ids; `verified` is refused for an agent provenance and accepted for `experimental`; `corroboration`
   stays `self-asserted` until a review edge from a *different* asserter, then becomes `cross-reviewed`;
-  freshness reads `fresh`/`stale`/`unknown` and cascades, and a `dvc:` evidence ref pins the `.dvc`
+  freshness reads `fresh`/`stale`/`unknown` per-claim (no claim→claim cascade — PRD 0002), and a `dvc:` evidence ref pins the `.dvc`
   md5; `head`/`index.md` surfaces unresolved contradictions and staleness rather than burying them;
   `publish` emits an immutable canonical-only OKF bundle + `log.md` diff.
 - **The keystone acceptance test (the existence justification, ADR 0004/0005):** reproduce the NK

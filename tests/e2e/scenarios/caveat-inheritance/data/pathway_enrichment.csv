@@ -1,0 +1,4 @@
+pathway,n_genes,nes,padj
+inflammatory_response,42,2.13,0.0007
+cell_cycle,55,1.76,0.0031
+apoptosis,38,-1.59,0.0140

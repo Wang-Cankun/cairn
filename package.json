@@ -11,7 +11,8 @@
     "cairn": "bun run src/cli.ts",
     "test": "bun test",
     "build:site": "cd site && bun install && bun run build",
-    "acceptance": "bash tests/acceptance.sh"
+    "acceptance": "bash tests/acceptance.sh",
+    "e2e": "bash tests/e2e/run.sh"
   },
   "engines": {
     "bun": ">=1.3.0"

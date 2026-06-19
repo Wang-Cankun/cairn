@@ -1,0 +1,28 @@
+{
+  "scenario": "caveat-inheritance",
+  "description": "One batch/design confound taints two claims; ground truth is ONE confound node + TWO inherits_caveat edges to it (not inlined prose).",
+  "claims": [
+    {
+      "key": "de",
+      "text_contains": "differential-expression signal",
+      "estimand_key": "tvc",
+      "caveats": ["batch"],
+      "evidence": [{ "kind": "file", "ref_contains": "de_results.csv" }],
+      "freshness": "fresh",
+      "lifecycle": "draft"
+    },
+    {
+      "key": "pathway",
+      "text_contains": "pathway enrichment",
+      "estimand_key": "tvc",
+      "caveats": ["batch"],
+      "evidence": [{ "kind": "file", "ref_contains": "pathway_enrichment.csv" }],
+      "freshness": "fresh",
+      "lifecycle": "draft"
+    }
+  ],
+  "confounds": [
+    { "key": "batch", "text_contains": "sequencing batch is perfectly confounded" }
+  ],
+  "reconcile": { "min_unreferenced": 0, "max_unreferenced": 0 }
+}

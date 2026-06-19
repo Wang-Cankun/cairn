@@ -1,0 +1,32 @@
+{
+  "scenario": "estimand-conflation",
+  "description": "Whole-cohort and early-subgroup effects look alike but are DIFFERENT estimands; conflating them under one id launders two questions into one robust-looking finding.",
+  "claims": [
+    {
+      "key": "whole_cohort",
+      "text_contains": "across the whole cohort",
+      "estimand_key": "ate_whole_cohort",
+      "evidence": [{ "kind": "file", "ref_contains": "effect_whole_cohort.csv" }],
+      "freshness": "fresh",
+      "verification": "unverified",
+      "lifecycle": "canonical"
+    },
+    {
+      "key": "early_subgroup",
+      "text_contains": "within the early-stage subgroup",
+      "estimand_key": "ate_early_subgroup",
+      "caveats": ["subgroup_selection"],
+      "evidence": [{ "kind": "file", "ref_contains": "effect_early_subgroup.csv" }],
+      "freshness": "fresh",
+      "verification": "unverified",
+      "lifecycle": "canonical"
+    }
+  ],
+  "confounds": [
+    {
+      "key": "subgroup_selection",
+      "text_contains": "post-hoc subgroup"
+    }
+  ],
+  "reconcile": { "min_unreferenced": null, "max_unreferenced": null }
+}

@@ -77,8 +77,21 @@ pass "self-review ignored; 2 distinct reviewers → cross-reviewed (verification
 # ==================================================================================
 echo "[5] verification territory-lock gate: experimental+verified OK, ai_proposed+verified FAILS"
 VHOST="$(mktemp -d "${TMPDIR:-/tmp}/cairn-vlock-XXXXXX")"
-mkdir -p "$VHOST/cairn/claims"
+mkdir -p "$VHOST/cairn/claims" "$VHOST/cairn/estimands"
 printf 'x\n1\n' > "$VHOST/e.csv"
+# The hand-built claims below cite est-aaaa00000001; author that node so referential integrity is met.
+cat > "$VHOST/cairn/estimands/est-aaaa00000001.md" <<'EOF'
+---
+type: estimand
+id: est-aaaa00000001
+asserter:
+  who: a
+  model: m
+  session: s
+  time: 2026-06-10T20:00:00-04:00
+---
+The question these claims answer.
+EOF
 mkclaim() { # mkclaim <dir> <id> <provenance> <verification>
   cat > "$1/cairn/claims/$2.md" <<EOF
 ---
