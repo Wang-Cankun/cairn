@@ -1,6 +1,8 @@
 # 0005 — Estimand is the structured handle; specification-equivalence stays in the Agent (no E/N/U field)
 
 Status: Accepted (2026-06-18)
+Amended: 2026-06-18 (PRD 0002) — added the estimand-required gate (c.1b): every canonical candidate
+must declare an estimand id (a pure presence check; the body is never read). Draft authoring stays soft.
 
 ## Context
 
@@ -41,6 +43,10 @@ legitimately collapse or settle. Not making it a field removes that vector.
   case-by-case domain judgments left to the Agent.
 - The only deterministic gate this needs is on the handle: **refuse to collapse siblings whose
   declared estimands differ.** No E/N/U is required for it.
+- **Estimand is required at the draft→canonical boundary** (added by PRD 0002): a draft may omit it
+  (soft authoring), but a claim cannot be promoted to / kept canonical without an `estimand` id — the
+  estimand-required gate (c.1b), a pure presence check that never reads the body. "Declare what you are
+  estimating" is mandatory on every claim a reader sees as canonical.
 - **Mechanics (how the handle is compared without interpretation).** An estimand is a **first-class
   OKF node** (`type: estimand`): its **body is the definition** (natural language, the Agent's), its
   **id is its identity**. Claims reference it by id (`estimand: <id>`). The CLI compares **ids**

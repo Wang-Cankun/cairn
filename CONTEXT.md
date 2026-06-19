@@ -71,30 +71,35 @@ v1 claims genuinely can be forgotten — the warn-only reconcile is the accepted
   before the gate; everything past the gate is always well-founded.
 - **Evidence** — a piece of grounding: a run, a file, a dataset, or an external reference.
 - **Grounding edge** — `claim → evidence`. The claim's feet on the ground.
-- **Dependency edge** — `claim → claim`. The claim standing on another's shoulders.
-  Distinct type from a grounding edge; does **not** count as grounding.
-- **Iron rule (well-founded)** — every claim has ≥1 edge, and following dependency edges
-  upward must terminate at the ground. A claim that cannot reach ground may not enter the
-  canonical head and may not be shared. Blocks circular reasoning. **Enforced at the
-  draft→canonical boundary** (the promotion/publish gate), not at write time — see
-  `docs/adr/0001-soft-authoring-draft-claims.md`.
+- **Dependency edge** — `claim → claim`, a claim standing on another's shoulders. **Reserved
+  vocabulary, NOT in the v2 schema** (deferred — see PRD 0002): v2 claims ground only through their
+  own evidence refs, never on another claim. Distinct from a grounding edge; would not count as
+  grounding if it were ever added.
+- **Iron rule (well-founded)** — every canonical claim grounds directly on ≥1 of its own evidence
+  refs (a run / file / data / external reference). A claim that cannot reach ground may not enter the
+  canonical head and may not be shared. Blocks circular reasoning — in v2 **by construction**: with no
+  claim→claim edge, a claim resting only on other claims is unrepresentable (no transitive walk, no
+  cycle to detect). **Enforced at the draft→canonical boundary** (the promotion/publish gate), not at
+  write time — see `docs/adr/0001-soft-authoring-draft-claims.md`.
 - **Freshness** — `fresh` / `stale` / `unknown`. **Derived from the evidence fingerprint, not
   from the compute process**: a claim is `fresh` if the artifact it points at still fingerprints
   the same as at authoring, `stale` if the artifact changed, `unknown` if the artifact is
-  unreachable or was only self-reported and can't be re-checked now. A claim is also stale if
-  anything it depends on is stale (cascade). `unknown` is a legal, honest state — a false
+  unreachable or was only self-reported and can't be re-checked now. (The dependency cascade — a
+  claim is stale if anything it depends on is stale — is specified by ADR 0002 but is a **no-op in
+  v2**, which has no claim→claim edge to cascade over.) `unknown` is a legal, honest state — a false
   `fresh` is the enemy. See `docs/adr/0002-freshness-by-evidence-fingerprint.md`.
 - **Fingerprint** — a recorded signature of an evidence artifact (content hash; or size+mtime
   as a weak fallback), stamped at authoring time. Quality is tiered and shown on the badge:
   a pipeline tool's content hash (e.g. targets) is the top tier; a self-reported remote
   `md5sum` is a lower tier; both are honest about which they are.
 - **Verification** — `unverified` / `verified` / `contradicted` / `unverifiable`. A separate
-  axis from freshness, and **territory-locked**: it means confirmation by something *independent of
-  the analysis system* (wet-lab, independent cohort). Default `unverified` — a structured, inheritable
-  warning light so `canonical` can never silently masquerade as `verified`. An **agent can never set
-  `verified`**: the CLI forbids it when provenance is agent-sourced; only a non-agent provenance
-  (experimental / human-confirmed) reaches it. Agent cross-review feeds **Corroboration**, not this
-  axis. See ADR 0006.
+  axis from freshness, and **territory-locked**: it means confirmation/refutation by something
+  *independent of the analysis system* (wet-lab, independent cohort). Default `unverified` — a
+  structured, inheritable warning light so `canonical` can never silently masquerade as `verified`. An
+  **agent can never set `verified` or `contradicted`** (the two "the territory has spoken" values):
+  Gate A admits them only for a **territory** provenance — the allowlist is `{experimental}`; every
+  other provenance is locked out. A human *reviewing* the analysis is consensus, fed to **Corroboration**
+  via `reviewed_by`, **not** territory. See ADR 0006 (amended by PRD 0002).
 - **Canonical head (`main`)** — the current agreed record. Publishing advances it.
 - **Snapshot** — an immutable, content-addressed freeze of the canonical head at one publish.
   Reruns move the head; readers see a diff against the snapshot they last saw.
@@ -108,7 +113,8 @@ v1 claims genuinely can be forgotten — the warn-only reconcile is the accepted
   effect, in which population, conditional on what). A **first-class structured handle**: cheap and
   stable, because it states the Agent's own intent, which it knows while analysing. Two claims are
   alternative specifications of one question only if they cite the same estimand; the CLI refuses to
-  collapse siblings whose declared estimands differ. Captures the load-bearing half of
+  collapse siblings whose declared estimands differ. **Every canonical claim must declare an estimand**
+  (the estimand-required gate, c.1b; a draft may omit it — soft authoring). Captures the load-bearing half of
   equivalence-typing — *effect-nonequivalence* (different estimand ⇒ different question ⇒ not
   comparable). Whether two same-estimand specs are otherwise equivalent (measurement / power) is the
   Agent's case-by-case lens, **not** a field. The E/N/U taxonomy is an Agent reasoning lens, never an

@@ -157,18 +157,20 @@ export type Corroboration = "self-asserted" | "cross-reviewed";
 
 /**
  * Source class of a claim (AGENT-ASSERTED). Drives the verification territory-lock (ADR-0006
- * Gate A): only `experimental` and `human_reviewed` are TERRITORY (independent wet-lab/cohort)
- * confirmation and may reach `verified`. `ai_proposed` AND `literature` are agent-sourced for the
- * gate and can never reach `verified` (a citation is not confirmation of THIS analysis).
+ * Gate A): only TERRITORY provenance — confirmation by something independent of the analysis system
+ * (wet-lab, independent cohort) — may reach `verified`/`contradicted`. See TERRITORY_PROVENANCE.
  */
-export type Provenance = "ai_proposed" | "human_reviewed" | "literature" | "experimental";
+export type Provenance = "ai_proposed" | "literature" | "experimental";
 
 /**
- * The set of provenances treated as AGENT-SOURCED by Gate A (cannot reach `verified`). PINNED:
- * `literature` is included here (ADR-0006). The complement — provenances that MAY reach `verified` —
- * is {experimental, human_reviewed}.
+ * The TERRITORY provenances Gate A admits to `verified`/`contradicted` (ADR-0006). ALLOWLIST,
+ * default-safe: any provenance NOT listed here can never reach `verified`/`contradicted`, so a future
+ * provenance value is locked out until it is explicitly admitted as territory. PINNED: only
+ * `experimental` is territory. A human *reviewing* the analysis is consensus, recorded on
+ * `reviewed_by`/`corroboration`, NOT territory; a citation (`literature`) is not confirmation of THIS
+ * analysis. The complement (everything else) is the agent-sourced set that can never be verified.
  */
-export const AGENT_SOURCED_PROVENANCE: readonly Provenance[] = ["ai_proposed", "literature"] as const;
+export const TERRITORY_PROVENANCE: readonly Provenance[] = ["experimental"] as const;
 
 /**
  * A named line of evidence with one or more artifact refs (AGENT-ASSERTED). This is the grounding-
@@ -234,7 +236,8 @@ export interface ClaimFrontmatter {
   text: string;
   /**
    * Single estimand id-ref (AGENT-ASSERTED). Compared by string-equality only (ADR-0005). May be
-   * absent on a `draft`; required to pass the gate to `canonical`.
+   * absent on a `draft`; REQUIRED to cross to `canonical` — the estimand-required gate (c.1b) refuses
+   * a candidate with no estimand id (presence check only; the body is never read).
    */
   estimand?: EstimandId;
   /** Named evidence lines; each line carries >=1 artifact ref. The grounding-edge carrier. */
@@ -492,6 +495,7 @@ export interface SnapshotDiff {
 /** The gate ids (each maps to a deterministic rule in section (c) of the spec). */
 export type GateId =
   | "reach-ground" // c.1, ADR-0001
+  | "estimand-required" // c.1b, ADR-0005 (a canonical candidate must declare an estimand)
   | "estimand-collapse" // c.2, ADR-0005
   | "resolution" // c.3, ADR-0001 extension
   | "verification-lock" // c.4, ADR-0006 Gate A
@@ -580,7 +584,6 @@ export const EVIDENCE_KINDS: readonly EvidenceKind[] = ["file", "external", "dvc
 /** Allowed provenance enum values (for validation). */
 export const PROVENANCES: readonly Provenance[] = [
   "ai_proposed",
-  "human_reviewed",
   "literature",
   "experimental",
 ] as const;

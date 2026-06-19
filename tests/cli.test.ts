@@ -168,6 +168,8 @@ describe("v2 CLI seam — authoring & locked fields", () => {
       "file:e.csv",
       "--provenance",
       "ai_proposed",
+      "--estimand",
+      "est-aaaa00000001",
       "--freshness",
       "fresh",
       "--verification",
@@ -253,6 +255,7 @@ describe("v2 CLI seam — gates via validate", () => {
         "contradicts: []",
         "inherits_caveat: []",
         `provenance: ${provenance}`,
+        "estimand: est-aaaa00000001",
         `id: ${id}`,
         "asserter:",
         "  who: a",
@@ -287,6 +290,151 @@ describe("v2 CLI seam — gates via validate", () => {
     expect(bad.stderr).not.toContain("clm-aaaa00000001");
   });
 
+  test("a grounded draft with NO estimand is refused promotion to canonical (estimand-required)", () => {
+    const h = host("estReq");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    // Grounded but estimand-less: a draft (soft) is fine, but it cannot cross to canonical.
+    run(h, ["add-claim", "--text", "Grounded but no estimand.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("estimand-required");
+    expect(v.stderr).toContain(id);
+
+    // publish refuses too (it validates first); nothing is promoted.
+    const pub = run(h, ["publish"]);
+    expect(pub.code).toBe(3);
+    expect(fmScalar(readClaimFile(h, id), "lifecycle")).toBe("draft");
+
+    // Declaring an estimand unblocks it: re-author with --estimand, then publish promotes it.
+    const est = run(h, ["add-estimand", "--def", "The question this claim answers."]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "Now with an estimand.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const id2 = claimIds(h).find((i) => i !== id)!;
+    const pub2 = run(h, ["publish"]);
+    // still fails because the FIRST estimand-less draft is grounded ⇒ still a candidate that blocks.
+    expect(pub2.code).toBe(3);
+    expect(pub2.stderr).toContain(id); // the estimand-less one is the offender
+    expect(pub2.stderr).not.toContain(`estimand-required] ${id2}`); // the estimand'd one is clean
+  });
+
+  test("human_reviewed is no longer a valid provenance (a human reviewing is consensus, not territory)", () => {
+    const h = host("noHumanReviewed");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const r = run(h, ["add-claim", "--text", "Reviewed by a human.", "--evidence", "file:e.csv", "--provenance", "human_reviewed"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/unknown provenance/);
+    // the advertised allowed-set no longer offers human_reviewed
+    expect(r.stderr).toMatch(/\(ai_proposed\|literature\|experimental\)/);
+  });
+
+  test("verification allowlist at the seam: experimental may be contradicted; ai_proposed cannot; literature cannot be verified", () => {
+    const h = host("vallow");
+    const claims = join(h, "cairn", "claims");
+    mkdirSync(claims, { recursive: true });
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const mk = (id: string, provenance: string, verification: string) =>
+      [
+        "---",
+        "type: claim",
+        `text: claim ${id}`,
+        "evidence_lines:",
+        "  - name: evidence",
+        "    refs:",
+        "      - kind: file",
+        "        ref: e.csv",
+        "depends_on_fork: []",
+        "contradicts: []",
+        "inherits_caveat: []",
+        `provenance: ${provenance}`,
+        "estimand: est-aaaa00000001",
+        `id: ${id}`,
+        "asserter:",
+        "  who: a",
+        "  model: m",
+        "  session: s",
+        "  time: 2026-06-10T20:00:00-04:00",
+        "reviewed_by: []",
+        "corroboration: self-asserted",
+        "fingerprints: []",
+        "freshness: unknown",
+        "reach_ground: true",
+        "lifecycle: canonical",
+        "resolution: open",
+        `verification: ${verification}`,
+        "---",
+        "body",
+        "",
+      ].join("\n");
+
+    // experimental (territory) + contradicted: the territory may refute ⇒ validate passes.
+    writeFileSync(join(claims, "clm-aaaa00000011.md"), mk("clm-aaaa00000011", "experimental", "contradicted"));
+    expect(run(h, ["validate"]).code).toBe(0);
+
+    // ai_proposed + contradicted: territory-locked the same as verified ⇒ refused.
+    writeFileSync(join(claims, "clm-bbbb00000012.md"), mk("clm-bbbb00000012", "ai_proposed", "contradicted"));
+    const r1 = run(h, ["validate"]);
+    expect(r1.code).toBe(3);
+    expect(r1.stderr).toContain("verification-lock");
+    expect(r1.stderr).toContain("clm-bbbb00000012");
+    expect(r1.stderr).not.toContain("clm-aaaa00000011"); // the experimental one is clean
+
+    // literature is NOT territory (allowlist is {experimental}) ⇒ literature + verified refused.
+    rmSync(join(claims, "clm-bbbb00000012.md"));
+    writeFileSync(join(claims, "clm-cccc00000013.md"), mk("clm-cccc00000013", "literature", "verified"));
+    const r2 = run(h, ["validate"]);
+    expect(r2.code).toBe(3);
+    expect(r2.stderr).toContain("verification-lock");
+    expect(r2.stderr).toContain("clm-cccc00000013");
+  });
+
+  test("refresh OVERRIDES a hand-edited illegal verification (write-time trust-field lock, not just a validate flag)", () => {
+    const h = host("refreshlock");
+    const claims = join(h, "cairn", "claims");
+    mkdirSync(claims, { recursive: true });
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    // A tampered claim: ai_proposed self-stamped as verified (illegal — agent-sourced is not territory).
+    const id = "clm-dddd00000021";
+    writeFileSync(
+      join(claims, `${id}.md`),
+      [
+        "---",
+        "type: claim",
+        `text: claim ${id}`,
+        "evidence_lines:",
+        "  - name: evidence",
+        "    refs:",
+        "      - kind: file",
+        "        ref: e.csv",
+        "depends_on_fork: []",
+        "contradicts: []",
+        "inherits_caveat: []",
+        "provenance: ai_proposed",
+        "estimand: est-aaaa00000001",
+        `id: ${id}`,
+        "asserter:",
+        "  who: a",
+        "  model: m",
+        "  session: s",
+        "  time: 2026-06-10T20:00:00-04:00",
+        "reviewed_by: []",
+        "corroboration: self-asserted",
+        "fingerprints: []",
+        "freshness: unknown",
+        "reach_ground: true",
+        "lifecycle: canonical",
+        "resolution: open",
+        "verification: verified",
+        "---",
+        "body",
+        "",
+      ].join("\n"),
+    );
+    // refresh is a write verb that re-locks every CLI-computed field; it must DISCARD the tampered value.
+    expect(run(h, ["refresh"]).code).toBe(0);
+    expect(fmScalar(readClaimFile(h, id), "verification")).toBe("unverified");
+  });
+
   test("settled is REFUSED while a contradiction is unresolved (canonical-but-not-settled)", () => {
     const h = host("settled");
     const claims = join(h, "cairn", "claims");
@@ -306,6 +454,7 @@ describe("v2 CLI seam — gates via validate", () => {
         contradicts ? `contradicts:\n  - ${contradicts}` : "contradicts: []",
         "inherits_caveat: []",
         "provenance: ai_proposed",
+        "estimand: est-aaaa00000001",
         `id: ${id}`,
         "asserter:",
         "  who: a",
@@ -458,7 +607,8 @@ describe("v2 CLI seam — orient surface & publish bundle", () => {
   test("publish freezes a canonical-only OKF bundle + appends a log.md diff entry; drafts never enter it", () => {
     const h = host("publish");
     writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
-    run(h, ["add-claim", "--text", "Grounded canonical-to-be.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"]);
+    const estPub = run(h, ["add-estimand", "--def", "Effect for the publish bundle test."]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "Grounded canonical-to-be.", "--evidence", "file:e.csv", "--estimand", estPub, "--provenance", "ai_proposed"]);
     run(h, ["add-claim", "--text", "Ungrounded draft, stays draft.", "--provenance", "ai_proposed"]);
 
     const pub = run(h, ["publish"]);
@@ -499,7 +649,8 @@ describe("v2 CLI seam — orient surface & publish bundle", () => {
   test("publish is reproducible (same view → same id, reused); a freshness-only change yields a NEW id and leaves the old snapshot byte-identical", () => {
     const h = host("repro");
     writeFileSync(join(h, "e.csv"), "a\n1\n", "utf8");
-    run(h, ["add-claim", "--text", "Repro.", "--evidence", "file:e.csv", "--provenance", "ai_proposed"]);
+    const estRepro = run(h, ["add-estimand", "--def", "Repro estimand."]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "Repro.", "--evidence", "file:e.csv", "--estimand", estRepro, "--provenance", "ai_proposed"]);
     const p1 = run(h, ["publish"]);
     const id1 = p1.stdout.match(/published snapshot ([0-9a-f]+)/)![1]!;
     const oldBytes = readFileSync(join(h, "cairn", "snapshots", id1, "head.json"));

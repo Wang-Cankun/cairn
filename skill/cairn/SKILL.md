@@ -44,8 +44,9 @@ store. Full verb/flag detail and worked examples: [`REFERENCE.md`](REFERENCE.md)
 5. **Point to a deflation route.** On residual uncertainty, record what would shrink it (clarify
    the estimand / more validation / redo the experiment). Point at the exit; you needn't walk it.
 6. **Distrust your own assertion.** Your claims are `provenance: ai_proposed`. You can **never**
-   set `verified` — it is territory-locked to `experimental` / `human_reviewed` (a citation does
-   not count). Seek review by a **different** asserter.
+   set `verified` or `contradicted` — both are territory-locked to `experimental` (a citation does
+   not count, and a human *reviewing* your analysis is consensus, not territory). For human/peer
+   sign-off, seek review by a **different** asserter — that feeds corroboration, never verification.
 7. **E/N/U is a lens, not a field.** Equivalence-typing (and any successor framework) is reasoning
    you write into the body — never an enforced enum. Don't fabricate one.
 8. **Persist both sides.** Neither a claim nor its contradicting sibling may be dropped;

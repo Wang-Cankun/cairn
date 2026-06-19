@@ -1,6 +1,10 @@
 # 0006 — Verification is territory-locked; agent cross-review is a separate, derived corroboration axis
 
 Status: Accepted (2026-06-18)
+Amended: 2026-06-18 (PRD 0002) — verification is admitted ONLY by `experimental` (territory). The
+original `human_reviewed`-reaches-`verified` path is removed: a human *reviewing* the analysis is
+consensus → corroboration, not territory. Gate A is now an allowlist (`TERRITORY_PROVENANCE =
+{experimental}`, default-locking any other value) and the lock covers `contradicted` symmetrically.
 
 ## Context
 
@@ -31,10 +35,12 @@ verification axis that reads as "half-verified" — the very masquerade option 3
 
 ## Decision
 
-- **`verification` is territory-locked.** It means confirmation by something independent of the
-  analysis system (wet-lab, independent cohort). Default `unverified` — the warning light. An **agent
-  can never set `verified`**: the CLI forbids `verified` when provenance is agent-sourced, and only a
-  non-agent provenance (experimental / human-confirmed) reaches it. *(Gate A — deterministic enum.)*
+- **`verification` is territory-locked.** It means confirmation/refutation by something independent of
+  the analysis system (wet-lab, independent cohort). Default `unverified` — the warning light. An
+  **agent can never set `verified` or `contradicted`**: Gate A admits these "the territory has spoken"
+  values ONLY for a TERRITORY provenance (allowlist: `experimental`); every other provenance is locked
+  out by default. A human *reviewing* the analysis is consensus, recorded on
+  `reviewed_by`/`corroboration`, NOT territory. *(Gate A — deterministic enum allowlist.)*
 - **Agent cross-review is a separate, derived `corroboration` axis, not a rung on verification.**
   `reviewed_by` is a structured edge set (asserter ids) the CLI stamps as fact. `corroboration` is
   **derived** (like freshness, not hand-set): `self-asserted` (one asserter) / `cross-reviewed`

@@ -1,13 +1,22 @@
 # 0001 — Soft authoring via draft claims; iron rule enforced at the canonical boundary
 
 Status: Accepted (2026-06-10)
+Amended: 2026-06-18 (PRD 0002) — (a) the draft invariant is restated as *no authority*, not
+*invisibility*: drafts are excluded from the orient surface / snapshot / published head but ARE
+queryable via `drafts`/`status`; (b) v2 implements the iron rule as a DIRECT per-claim grounding check
+— the schema has no claim→claim dependency edge, so there is no transitive walk and no cycle case.
 
 ## Context
 
-Cairn's central guarantee (the Iron rule) is that every claim is well-founded: it has at least
-one edge, and following dependency edges upward terminates at the ground (a run / file / data /
-external reference). No claim may rest only on other claims — that would be circular reasoning
-wearing a provenance costume, the exact failure Cairn exists to prevent.
+Cairn's central guarantee (the Iron rule) is that every claim is well-founded: it stands on real
+evidence (a run / file / data / external reference), never only on other claims — circular reasoning
+wearing a provenance costume is the exact failure Cairn exists to prevent.
+
+(v2 note: the schema carries NO claim→claim dependency edge. A claim grounds directly through ≥1 of
+its own evidence refs or not at all; "rests only on other claims" is therefore unrepresentable, so the
+iron rule holds *by construction* — there is no transitive walk upward and no dependency cycle to
+detect. The text below describes the original transitive framing; v2 realises the same guarantee more
+simply. See PRD 0002.)
 
 The open question was *when* that rule is enforced relative to authoring:
 
@@ -26,12 +35,17 @@ recording that one first.
 Adopt **soft authoring with a hard boundary.**
 
 - A claim may be created as a **draft** with no edge.
-- Draft claims live **only in the Owner's working area**. They are never read by a Collaborator
-  or a Fresh session, never emitted in `head.json`, never included in a Snapshot.
+- Draft claims carry **no authority**: never emitted on the canonical orient surface
+  (`head`/`index.md`), never in `head.json`, never in a Snapshot bundle. They are **not invisible**,
+  though — an Agent (including a Fresh session) may query them via `cairn drafts` / `cairn status`.
+  The split is *visibility* (queryable shared working memory) vs *authority* (never read as canonical),
+  not presence vs absence. See PRD 0002.
 - The claim lifecycle is `draft → canonical`. Promotion to canonical is the **hard gate**: the
-  promotion/publish step runs the well-founded check (the recursive reach-ground query) over
-  the candidate canonical set and **refuses** if any claim that would enter canonical is not
-  grounded — including dependency cycles, which never reach ground.
+  promotion/publish step runs the reach-ground check over the candidate canonical set and **refuses**
+  any claim that would enter canonical without a grounding edge. (v2: a direct per-claim check — each
+  candidate must carry ≥1 of its own evidence refs; with no claim→claim edge there is no transitive
+  query and no cycle case to handle. A canonical candidate must also declare an `estimand` — the
+  companion estimand-required gate, ADR 0005 / PRD 0002.)
 
 So softness is real but **bounded**: it exists entirely *before* the gate. Everything a reader
 ever sees (canonical) is always well-founded. We chose authoring ergonomics for the working

@@ -6,8 +6,9 @@
  * agreeing paths, averages, or scores (ADR-0004). Each gate, on failure, yields a GateViolation
  * naming the gate id and the offending claim; `validate` exits non-zero on any violation.
  *
- * The six gates (spec §c):
+ * The gates (spec §c):
  *   c.1 reach-ground      (ADR-0001) — iron rule at the draft→canonical boundary.
+ *   c.1b estimand-required (ADR-0005) — a canonical candidate must declare an estimand id.
  *   c.2 estimand-collapse (ADR-0005) — refuse to treat siblings as one set across differing ids.
  *   c.3 resolution        (ADR-0001 ext) — refuse `settled` while a contradicts edge is unresolved.
  *   c.4 verification-lock (ADR-0006 A) — refuse `verified` for agent-sourced provenance.
@@ -26,7 +27,7 @@
  */
 
 import { isGrounded } from "./claimfile.ts";
-import { AGENT_SOURCED_PROVENANCE } from "./types.ts";
+import { TERRITORY_PROVENANCE } from "./types.ts";
 import type {
   ClaimFile,
   ClaimFrontmatter,
@@ -91,6 +92,35 @@ export function reachGroundViolations(candidates: ClaimFile[]): GateViolation[] 
         gate: "reach-ground",
         claim: fm.id,
         message: `claim ${fm.id} does not reach ground: no grounding edge (≥1 evidence ref required to promote to canonical)`,
+      });
+    }
+  }
+  return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// c.1b — Estimand-required gate (canonical must declare an estimand) — ADR-0005
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Refuse to promote / keep canonical any candidate that declares no `estimand` id. A draft MAY omit
+ * the estimand (soft authoring lives before the gate), but "which question am I answering" is
+ * mandatory on every claim a reader sees as canonical — the first methodological step (ADR-0005).
+ *
+ * PURE PRESENCE CHECK: it tests only that the id field exists, never reads the estimand body — the
+ * ADR-0005 ceiling holds (the CLI compares ids, it never judges meaning). Returns one violation per
+ * candidate missing an estimand. Non-candidate (zero-edge) drafts are exempt — they are not in the
+ * candidate set this runs over.
+ */
+export function estimandPresenceViolations(candidates: ClaimFile[]): GateViolation[] {
+  const out: GateViolation[] = [];
+  for (const c of candidates) {
+    const fm = c.frontmatter;
+    if (fm.estimand === undefined) {
+      out.push({
+        gate: "estimand-required",
+        claim: fm.id,
+        message: `claim ${fm.id} cannot be canonical: it declares no estimand id (every canonical claim must declare which question it answers, ADR-0005)`,
       });
     }
   }
@@ -216,28 +246,37 @@ export function lockedResolution(fm: ClaimFrontmatter, liveIds: ReadonlySet<stri
 // c.4 — Verification territory-lock gate (Gate A) — ADR-0006
 // ──────────────────────────────────────────────────────────────────────────────
 
-const AGENT_SOURCED: ReadonlySet<string> = new Set(AGENT_SOURCED_PROVENANCE);
+const TERRITORY: ReadonlySet<string> = new Set(TERRITORY_PROVENANCE);
 
-/** True iff the claim's provenance is agent-sourced (cannot reach `verified`): {ai_proposed, literature}. */
-export function isAgentSourced(fm: ClaimFrontmatter): boolean {
-  return AGENT_SOURCED.has(fm.provenance);
+/**
+ * The verification values that mean "the territory has spoken" — confirmation OR refutation by
+ * something independent of the analysis system. Both are territory-locked; an agent can self-stamp
+ * neither. `unverified`/`unverifiable` are agent-settable (they assert the territory has NOT, or
+ * cannot, speak), so they are not locked.
+ */
+const TERRITORY_LOCKED_VERIFICATION: ReadonlySet<string> = new Set(["verified", "contradicted"]);
+
+/** True iff the claim's provenance is territory (may reach `verified`/`contradicted`): {experimental}. */
+export function isTerritory(fm: ClaimFrontmatter): boolean {
+  return TERRITORY.has(fm.provenance);
 }
 
 /**
- * Refuse `verification=verified` when provenance is agent-sourced ({ai_proposed, literature}). Only
- * {experimental, human_reviewed} — territory (independent wet-lab/cohort) confirmation — may reach
- * `verified`. Pure enum check.
+ * Refuse a territory-locked verification (`verified`/`contradicted`) when provenance is NOT territory.
+ * Only TERRITORY provenance ({experimental}) — confirmation/refutation independent of the analysis
+ * system — may reach them; an agent-sourced provenance can self-stamp neither (a human *reviewing* the
+ * analysis is consensus, not territory). Pure enum check (allowlist).
  */
 export function verificationLockViolations(candidates: ClaimFile[]): GateViolation[] {
   const out: GateViolation[] = [];
   for (const c of candidates) {
     const fm = c.frontmatter;
-    if (fm.verification === "verified" && isAgentSourced(fm)) {
+    if (TERRITORY_LOCKED_VERIFICATION.has(fm.verification) && !isTerritory(fm)) {
       out.push({
         gate: "verification-lock",
         claim: fm.id,
         detail: fm.provenance,
-        message: `claim ${fm.id} cannot be verified: provenance "${fm.provenance}" is agent-sourced; only experimental/human_reviewed reach verified (ADR-0006 Gate A)`,
+        message: `claim ${fm.id} cannot be ${fm.verification}: provenance "${fm.provenance}" is not territory; only experimental reaches verified/contradicted (ADR-0006 Gate A)`,
       });
     }
   }
@@ -245,12 +284,12 @@ export function verificationLockViolations(candidates: ClaimFile[]): GateViolati
 }
 
 /**
- * The DERIVED/LOCKED verification value: agent-sourced provenance is forced down to `unverified` if a
- * `verified` value was supplied; any non-`verified` value passes through (the CLI may still set
- * contradicted/unverifiable). The writer uses this to override an illegal self-stamped `verified`.
+ * The DERIVED/LOCKED verification value: a territory-locked value (`verified`/`contradicted`) on a
+ * non-territory provenance is forced down to `unverified`; any other value passes through (the CLI may
+ * still set `unverifiable`). The writer uses this to override an illegal self-stamped trust badge.
  */
 export function lockedVerification(fm: ClaimFrontmatter): Verification {
-  if (fm.verification === "verified" && isAgentSourced(fm)) return "unverified";
+  if (TERRITORY_LOCKED_VERIFICATION.has(fm.verification) && !isTerritory(fm)) return "unverified";
   return fm.verification;
 }
 
@@ -378,8 +417,9 @@ export function relockTrustFields<T extends ClaimFrontmatter>(
  * Run the full promotion/publish gate suite over the claim set and return a single GateResult.
  *
  * Pure (no disk writes, no fingerprinting). Builds the candidate-canonical set, then runs, in the
- * PINNED order: reach-ground (c.1) → verification-lock (c.4) → corroboration (c.5) → resolution
- * (c.3), plus the trust-field-lock meta-check (c.6). The collapse-refusal gate (c.2) is NOT run here
+ * PINNED order: reach-ground (c.1) → estimand-required (c.1b) → verification-lock (c.4) →
+ * corroboration (c.5) → resolution (c.3), plus the trust-field-lock meta-check (c.6). The
+ * collapse-refusal gate (c.2) is NOT run here
  * — it guards sibling grouping at the orient/diff surface, independent of promotion, and is exposed
  * separately as `collapseRefusalViolation`.
  *
@@ -392,6 +432,7 @@ export function runGate(claims: ClaimFile[]): GateResult {
 
   const violations: GateViolation[] = [
     ...reachGroundViolations(candidates),
+    ...estimandPresenceViolations(candidates),
     ...verificationLockViolations(candidates),
     ...corroborationViolations(candidates),
     ...resolutionViolations(candidates, liveIds),

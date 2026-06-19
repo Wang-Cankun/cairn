@@ -48,9 +48,10 @@ may be created bare and grounded a moment later.
 ## Gates (run by `validate`; each blocks `publish`)
 
 - **reach-ground** — every canonical claim must reach real evidence; cycles never do.
+- **estimand-required** — every canonical claim must declare an estimand id (a draft may omit it).
 - **collapse-refusal** — claims with differing estimand ids are never merged into one multiverse.
 - **resolution** — a `settled` write is refused while any `contradicts` edge stands.
-- **verification territory-lock** — an agent can never set `verified` (provenance must be `experimental` / `human_reviewed`).
+- **verification territory-lock** — an agent can never set `verified`/`contradicted` (provenance must be `experimental`; a human reviewing the analysis feeds corroboration, not verification).
 - **corroboration** — no self-review; `cross-reviewed` needs ≥2 distinct asserter ids.
 - **trust-field lock** — any agent-supplied computed field is discarded and recomputed.
 

@@ -50,7 +50,7 @@ pass "estimand $EST + grounded draft $C1 (fresh, self-asserted, reach_ground=tru
 # ==================================================================================
 echo "[2] trust-field lock: a supplied verified/corroboration is OVERRIDDEN by the CLI"
 cairn add-claim --text "I tried to self-stamp trust." --evidence file:scores.csv \
-  --provenance ai_proposed --verification verified --corroboration cross-reviewed >/dev/null \
+  --estimand "$EST" --provenance ai_proposed --verification verified --corroboration cross-reviewed >/dev/null \
   || die "add-claim (self-stamp attempt) nonzero exit"
 C2="$(ls "$HOST/cairn/claims" | sed -n '2p' | sed 's/\.md$//')"
 [ -n "$C2" ] || die "could not resolve self-stamp claim id"
@@ -93,6 +93,7 @@ depends_on_fork: []
 contradicts: []
 inherits_caveat: []
 provenance: $3
+estimand: est-aaaa00000001
 id: $2
 asserter:
   who: a

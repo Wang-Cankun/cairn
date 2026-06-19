@@ -148,7 +148,7 @@ function parseFork(spec: string): ForkChoice {
 }
 
 function parseProvenance(v: string | undefined): Provenance {
-  if (!v) fail("add-claim requires --provenance (ai_proposed|human_reviewed|literature|experimental)", 2);
+  if (!v) fail(`add-claim requires --provenance (${PROVENANCES.join("|")})`, 2);
   if (!(PROVENANCES as readonly string[]).includes(v)) {
     fail(`unknown provenance "${v}" (${PROVENANCES.join("|")})`, 2);
   }
