@@ -171,6 +171,61 @@ const EST = /est-[0-9a-f]+/;
 const CFD = /cfd-[0-9a-f]+/;
 
 // ════════════════════════════════════════════════════════════════════════════════
+describe("init — greenfield store scaffold", () => {
+  test("scaffolds the OKF skeleton + config/index/log on a bare host, and the fresh store validates", () => {
+    const h = host("init");
+    expect(existsSync(join(h, "cairn"))).toBe(false); // bare host, no store yet
+
+    const r = run(h, ["init"]);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("Cairn store ready");
+
+    // skeleton dirs stood up
+    for (const d of ["claims", "estimands", "confounds", "snapshots"]) {
+      expect(existsSync(join(h, "cairn", d))).toBe(true);
+    }
+    // self-describing surface + log + config emitted
+    expect(existsSync(join(h, "cairn", "index.md"))).toBe(true);
+    expect(existsSync(join(h, "cairn", "log.md"))).toBe(true);
+    const cfg = JSON.parse(readFileSync(join(h, "cairn", "config.json"), "utf8"));
+    expect(cfg.findings_globs).toEqual(["FINDINGS.md"]); // default glob when none given
+
+    // the bench depends on this: a freshly-init'd (empty) store passes validate
+    expect(run(h, ["validate"]).code).toBe(0);
+  });
+
+  test("never clobbers an existing config (idempotent re-init keeps the owner's config)", () => {
+    const h = host("init-idem");
+    expect(run(h, ["init"]).code).toBe(0);
+    writeFileSync(
+      join(h, "cairn", "config.json"),
+      JSON.stringify({ findings_globs: ["custom/*.md"] }) + "\n",
+      "utf8",
+    );
+    const r2 = run(h, ["init"]);
+    expect(r2.code).toBe(0);
+    expect(r2.stdout).toContain("kept existing");
+    const cfg = JSON.parse(readFileSync(join(h, "cairn", "config.json"), "utf8"));
+    expect(cfg.findings_globs).toEqual(["custom/*.md"]); // untouched
+  });
+
+  test("--findings (repeatable) and --remote-host land in config.json", () => {
+    const h = host("init-flags");
+    const r = run(h, ["init", "--findings", "results/*.md", "--findings", "notes.md", "--remote-host", "osc"]);
+    expect(r.code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(h, "cairn", "config.json"), "utf8"));
+    expect(cfg.findings_globs).toEqual(["results/*.md", "notes.md"]);
+    expect(cfg.remote_host).toBe("osc");
+  });
+
+  test("--dvc is a boolean toggle that never blocks init (dvc absent/failed just warns)", () => {
+    const h = host("init-dvc");
+    const r = run(h, ["init", "--dvc"]); // must not error on a missing value, and must not hard-fail
+    expect(r.code).toBe(0);
+    expect(existsSync(join(h, "cairn", "config.json"))).toBe(true);
+  });
+});
+
 describe("v2 CLI seam — authoring & locked fields", () => {
   test("add-claim writes a well-formed OKF claim with CLI-stamped locked fields", () => {
     const h = host("author");
