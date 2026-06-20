@@ -46,7 +46,7 @@ Cairn 由一个 AI agent 通过四个触点驱动（即 [skill](skill/cairn/SKIL
 | **Refresh（刷新）** | `cairn refresh` | 重新给产物打指纹；浮出新近变 stale 的 claim |
 | **Publish（发布）** | `cairn validate` → `cairn publish` | 过闸，然后冻结一个不可变的 OKF bundle |
 
-完整动词集：`head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · migrate`。
+完整动词集：`head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · init · migrate`。
 
 ## 工作原理
 

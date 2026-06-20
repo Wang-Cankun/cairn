@@ -46,7 +46,7 @@ Cairn is driven by an AI agent through four touchpoints (the [skill](skill/cairn
 | **Refresh** | `cairn refresh` | re-fingerprint artifacts; surface newly-stale claims |
 | **Publish** | `cairn validate` → `cairn publish` | gate, then freeze an immutable OKF bundle |
 
-Full verb set: `head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · migrate`.
+Full verb set: `head · add-claim · add-estimand · add-confound · review · refresh · validate · publish · drafts · status · reconcile · init · migrate`.
 
 ## How it works
 

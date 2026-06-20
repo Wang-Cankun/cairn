@@ -6,7 +6,10 @@ sole writer and walks up from the cwd to find the store.
 ## Verbs
 
 `head` · `drafts` · `status` · `add-estimand` · `add-claim` · `add-confound` · `review` ·
-`refresh` · `validate` · `publish` · `reconcile` · `migrate`
+`refresh` · `validate` · `publish` · `reconcile` · `init` · `migrate`
+
+`init` (greenfield) and `migrate` (from a v1 store) are one-time **scaffolding** verbs — they stand up
+the OKF skeleton, then the four touchpoints in [`SKILL.md`](SKILL.md) drive everything after.
 
 ## Authoring
 
