@@ -1,6 +1,6 @@
 # 0007 — The claim body is gated at the canonical boundary: its narrative movements must be present to publish
 
-Status: Proposed (2026-06-20)
+Status: Accepted (2026-06-20)
 
 ## Context
 
