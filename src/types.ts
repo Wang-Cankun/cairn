@@ -496,6 +496,7 @@ export interface SnapshotDiff {
 export type GateId =
   | "reach-ground" // c.1, ADR-0001
   | "estimand-required" // c.1b, ADR-0005 (a canonical candidate must declare an estimand)
+  | "body-movements" // c.1c, ADR-0007 (body narrative movements present at the canonical boundary)
   | "estimand-collapse" // c.2, ADR-0005
   | "resolution" // c.3, ADR-0001 extension
   | "verification-lock" // c.4, ADR-0006 Gate A

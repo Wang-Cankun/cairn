@@ -9,6 +9,9 @@
  * The gates (spec §c):
  *   c.1 reach-ground      (ADR-0001) — iron rule at the draft→canonical boundary.
  *   c.1b estimand-required (ADR-0005) — a canonical candidate must declare an estimand id.
+ *   c.1c body-movements   (ADR-0007) — a canonical candidate's body narrative movements must be present
+ *                          (required section header present AND its skeleton cue gone): literal-substring
+ *                          presence + edge count, never meaning. An empty/header-deleted body is refused.
  *   c.2 estimand-collapse (ADR-0005) — refuse to treat siblings as one set across differing ids.
  *   c.3 resolution        (ADR-0001 ext) — refuse `settled` while a contradicts edge is unresolved.
  *   c.4 verification-lock (ADR-0006 A) — refuse `verified` for agent-sourced provenance.
@@ -27,6 +30,14 @@
  */
 
 import { isGrounded } from "./claimfile.ts";
+import {
+  BODY_HEADER_CONCLUSION,
+  BODY_HEADER_CONTRADICTION,
+  BODY_HEADER_DEFLATION,
+  CUE_CONCLUSION,
+  CUE_CONTRADICTION,
+  CUE_DEFLATION,
+} from "./claimbody.ts";
 import { TERRITORY_PROVENANCE } from "./types.ts";
 import type {
   ClaimFile,
@@ -121,6 +132,77 @@ export function estimandPresenceViolations(candidates: ClaimFile[]): GateViolati
         gate: "estimand-required",
         claim: fm.id,
         message: `claim ${fm.id} cannot be canonical: it declares no estimand id (every canonical claim must declare which question it answers, ADR-0005)`,
+      });
+    }
+  }
+  return out;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// c.1c — Body-movements gate (the body's narrative movements must be present) — ADR-0007
+// ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Refuse to promote / keep canonical any candidate whose body has NOT actually delivered a required
+ * narrative movement. A movement is delivered iff its section HEADER is present AND its placeholder CUE
+ * is gone. Requiring the header (not merely cue-absence) is what gives ADR-0007 its stated guarantee:
+ * "the body can no longer be empty in canonical / published state" (§Consequences). A body that is
+ * empty, whitespace-only, or has had its skeleton headers deleted carries no cue either — so a
+ * cue-absence-only check would let it through and permanently lose the reasoning the ADR exists to
+ * protect. Demanding the header closes that escape while staying pure presence.
+ *
+ * The body is the only per-claim narrative that survives into a published snapshot, so axiom 9 gains a
+ * structural floor at the draft→canonical boundary (ADR-0007). Drafts are exempt: a non-candidate draft
+ * may carry the unfilled skeleton (soft authoring, ADR-0001); this runs only over the candidate set.
+ *
+ * The three movements and the exact condition on each (ADR-0007 §Decision):
+ *   - Conclusion — ALWAYS required: its header must be present AND its cue gone.
+ *   - Contradiction/caveat — required ONLY when the claim declares ≥1 `contradicts` or `inherits_caveat`
+ *     edge; with none, the movement is not required at all (the skeleton's "<none declared>" is a
+ *     legitimately complete "nothing to explain" state, so a no-edge claim need not carry this section).
+ *   - Deflation — required: its header must be present AND its cue gone (i.e. `deflation_route` is set).
+ *
+ * PURE MECHANISM (ADR-0004 ceiling): literal-substring presence of the shared header + cue constants,
+ * plus a frontmatter edge COUNT for movement 2 — it never reads the body for meaning, never judges
+ * quality. The body is already in-memory on each ClaimFile (`c.body`), so this gate is filesystem-free.
+ * One violation per undelivered movement.
+ */
+export function bodyMovementViolations(candidates: ClaimFile[]): GateViolation[] {
+  const out: GateViolation[] = [];
+  for (const c of candidates) {
+    const fm = c.frontmatter;
+    // A movement is delivered iff its header is present AND its cue is gone — header presence is what
+    // forbids an empty / header-deleted body from slipping past cue-absence alone (ADR-0007 §Consequences).
+    const delivered = (header: string, cue: string): boolean =>
+      c.body.includes(header) && !c.body.includes(cue);
+    // Movement 1 — conclusion: always required.
+    if (!delivered(BODY_HEADER_CONCLUSION, CUE_CONCLUSION)) {
+      out.push({
+        gate: "body-movements",
+        claim: fm.id,
+        detail: "conclusion",
+        message: `claim ${fm.id} cannot be canonical: the conclusion movement is unfilled (section header missing or skeleton cue still present, ADR-0007)`,
+      });
+    }
+    // Movement 2 — contradiction/caveat: required ONLY if ≥1 edge declared (count, never read meaning).
+    if (
+      (fm.contradicts.length > 0 || fm.inherits_caveat.length > 0) &&
+      !delivered(BODY_HEADER_CONTRADICTION, CUE_CONTRADICTION)
+    ) {
+      out.push({
+        gate: "body-movements",
+        claim: fm.id,
+        detail: "contradiction",
+        message: `claim ${fm.id} cannot be canonical: it declares a contradicts/inherits_caveat edge but the contradiction movement is unfilled (section header missing or skeleton cue still present, ADR-0007)`,
+      });
+    }
+    // Movement 3 — deflation (what would change it): required.
+    if (!delivered(BODY_HEADER_DEFLATION, CUE_DEFLATION)) {
+      out.push({
+        gate: "body-movements",
+        claim: fm.id,
+        detail: "deflation",
+        message: `claim ${fm.id} cannot be canonical: the deflation (what-would-change-it) movement is unfilled (section header missing or skeleton cue still present, ADR-0007)`,
       });
     }
   }
@@ -417,8 +499,9 @@ export function relockTrustFields<T extends ClaimFrontmatter>(
  * Run the full promotion/publish gate suite over the claim set and return a single GateResult.
  *
  * Pure (no disk writes, no fingerprinting). Builds the candidate-canonical set, then runs, in the
- * PINNED order: reach-ground (c.1) → estimand-required (c.1b) → verification-lock (c.4) →
- * corroboration (c.5) → resolution (c.3), plus the trust-field-lock meta-check (c.6). The
+ * PINNED order: reach-ground (c.1) → estimand-required (c.1b) → body-movements (c.1c) →
+ * verification-lock (c.4) → corroboration (c.5) → resolution (c.3), plus the trust-field-lock
+ * meta-check (c.6). The
  * collapse-refusal gate (c.2) is NOT run here
  * — it guards sibling grouping at the orient/diff surface, independent of promotion, and is exposed
  * separately as `collapseRefusalViolation`.
@@ -433,6 +516,7 @@ export function runGate(claims: ClaimFile[]): GateResult {
   const violations: GateViolation[] = [
     ...reachGroundViolations(candidates),
     ...estimandPresenceViolations(candidates),
+    ...bodyMovementViolations(candidates),
     ...verificationLockViolations(candidates),
     ...corroborationViolations(candidates),
     ...resolutionViolations(candidates, liveIds),

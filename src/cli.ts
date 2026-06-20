@@ -18,6 +18,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { computeFreshness } from "./freshness.ts";
+import { skeletonBody } from "./claimbody.ts";
 import { relockTrustFields, runGate } from "./gate.ts";
 import { stampFingerprints } from "./fingerprint.ts";
 import { isGrounded } from "./claimfile.ts";
@@ -278,25 +279,6 @@ function cmdAddClaim(paths: StorePaths, parsed: Parsed): void {
   appendLog(paths, `- add-claim ${id} by ${asserter.who} at ${time} (${refs.length} evidence ref(s))`);
   console.log(`created ${id} (draft, ${refs.length} evidence ref(s), provenance=${provenance})`);
   console.log(path);
-}
-
-/** A skeleton claim body cueing the three required movements (Skill fills the prose). */
-function skeletonBody(fm: ClaimFrontmatter): string {
-  return [
-    "## Conclusion, with its conditions",
-    "",
-    "<state the claim and the fork(s) it is conditional on, in prose>",
-    "",
-    "## The contradiction and the caveat",
-    "",
-    fm.contradicts.length > 0 || fm.inherits_caveat.length > 0
-      ? "<for each contradicts / inherited caveat, explain why it matters>"
-      : "<none declared>",
-    "",
-    "## What would change it",
-    "",
-    fm.deflation_route ?? "<the deflation route: what would shrink the residual uncertainty>",
-  ].join("\n");
 }
 
 /** add-estimand — mint est-<hash>, stamp asserter, body = the natural-language definition. */

@@ -21,10 +21,35 @@ die()  { echo "  FAIL  $1"; FAIL=$((FAIL + 1)); echo; echo "ACCEPTANCE FAILED ($
 
 # cairn <args...> run inside the temp host (cwd = host root so store discovery walks up correctly).
 cairn() { ( cd "$HOST" && bun run "$CLI" "$@" ); }
-# first id of a given kind currently on disk
-firstid() { ls "$HOST/cairn/$1" 2>/dev/null | sed -n '1p' | sed 's/\.md$//'; }
 fmval() { # fmval <claim-id> <key> -> the top-level scalar from the claim frontmatter
   sed -n '/^---$/,/^---$/p' "$HOST/cairn/claims/$1.md" | sed -n "s/^$2: \\(.*\\)$/\\1/p" | tail -1
+}
+fmval2() { # fmval2 <host> <claim-id> <key> -> the top-level scalar (host-parameterized variant)
+  sed -n '/^---$/,/^---$/p' "$1/cairn/claims/$2.md" | sed -n "s/^$3: \\(.*\\)$/\\1/p" | tail -1
+}
+# fillbody <claim-file-path> — replace the skeleton body (ADR-0007 body-movements) with real prose for
+# all three movements so the claim can cross the canonical boundary. There is no body-fill CLI verb; we
+# overwrite the body on disk (the frontmatter — everything through the closing `---` — is preserved).
+fillbody() {
+  local f="$1" tmp
+  tmp="$(mktemp)"
+  # Keep through the SECOND `---` (the closing frontmatter fence), then append a filled body.
+  awk 'BEGIN{n=0} {print} /^---$/{n++; if(n==2){exit}}' "$f" > "$tmp"
+  cat >> "$tmp" <<'EOF'
+
+## Conclusion, with its conditions
+
+The effect holds, conditional on the cohort-C fork; under the alternate fork it attenuates.
+
+## The contradiction and the caveat
+
+The contesting sibling reverses the sign under the same estimand, which is why it matters here.
+
+## What would change it
+
+A pre-registered replication on an independent cohort would shrink the residual uncertainty.
+EOF
+  mv "$tmp" "$f"
 }
 
 HOST="$(mktemp -d "${TMPDIR:-/tmp}/cairn-acc-XXXXXX")"
@@ -37,10 +62,13 @@ echo "[1] author an estimand + a grounded claim citing it"
 printf 'a,b\n1,2\n' > "$HOST/scores.csv"
 EST="$(cairn add-estimand --def "Does treatment T raise outcome O in cohort C?" | sed -n 's/^\(est-[0-9a-f]*\)$/\1/p' | head -1)"
 [ -n "$EST" ] || die "add-estimand did not print an est- id"
-cairn add-claim --text "T raises O." --evidence file:scores.csv --estimand "$EST" \
-  --provenance ai_proposed --as author-A >/dev/null || die "add-claim (grounded) nonzero exit"
-C1="$(firstid claims)"
-[ -n "$C1" ] || die "could not resolve grounded claim id"
+# Capture the minted id from add-claim's own output ("created clm-<hash> …"), NOT from `ls` — claim
+# files are named by content-hash id and `ls` sorts by that id, not creation order, so positional
+# selection (sed -n '2p') can collide two claims onto one file (observed C1==C2). The printed id is
+# the authoritative creation-order handle.
+C1="$(cairn add-claim --text "T raises O." --evidence file:scores.csv --estimand "$EST" \
+  --provenance ai_proposed --as author-A | sed -n 's/^created \(clm-[0-9a-f]*\) .*/\1/p')"
+[ -n "$C1" ] || die "could not resolve grounded claim id from add-claim output"
 [ "$(fmval "$C1" lifecycle)" = "draft" ] || die "new claim must be a draft"
 [ "$(fmval "$C1" reach_ground)" = "true" ] || die "grounded claim must have reach_ground:true"
 [ "$(fmval "$C1" freshness)" = "fresh" ] || die "claim on a present local file must be fresh"
@@ -49,18 +77,24 @@ pass "estimand $EST + grounded draft $C1 (fresh, self-asserted, reach_ground=tru
 
 # ==================================================================================
 echo "[2] trust-field lock: a supplied verified/corroboration is OVERRIDDEN by the CLI"
-cairn add-claim --text "I tried to self-stamp trust." --evidence file:scores.csv \
-  --estimand "$EST" --provenance ai_proposed --verification verified --corroboration cross-reviewed >/dev/null \
-  || die "add-claim (self-stamp attempt) nonzero exit"
-C2="$(ls "$HOST/cairn/claims" | sed -n '2p' | sed 's/\.md$//')"
-[ -n "$C2" ] || die "could not resolve self-stamp claim id"
+# Again capture the id from add-claim's output, not `ls … | sed -n '2p'` (hash-sorted, not creation
+# order — it can return C1's file and collide C2==C1).
+C2="$(cairn add-claim --text "I tried to self-stamp trust." --evidence file:scores.csv \
+  --estimand "$EST" --provenance ai_proposed --verification verified --corroboration cross-reviewed \
+  | sed -n 's/^created \(clm-[0-9a-f]*\) .*/\1/p')"
+[ -n "$C2" ] || die "could not resolve self-stamp claim id from add-claim output"
+[ "$C2" != "$C1" ] || die "C2 must be a distinct claim from C1 (id-resolution collision)"
 [ "$(fmval "$C2" verification)" = "unverified" ] || die "supplied verified must be overridden to unverified (ai_proposed)"
 [ "$(fmval "$C2" corroboration)" = "self-asserted" ] || die "supplied cross-reviewed must be overridden to self-asserted"
 pass "self-stamped verified/cross-reviewed discarded → unverified/self-asserted"
 
 # ==================================================================================
-echo "[3] validate passes with grounded candidates"
-cairn validate >/dev/null 2>&1 || die "validate should pass (grounded candidates, no gate violations)"
+echo "[3] validate passes with grounded candidates (bodies filled — ADR-0007 body-movements)"
+# Both C1 and C2 are grounded+estimand'd candidates; their add-claim skeleton bodies must be filled
+# before the canonical boundary or the body-movements gate refuses them.
+fillbody "$HOST/cairn/claims/$C1.md"
+fillbody "$HOST/cairn/claims/$C2.md"
+cairn validate >/dev/null 2>&1 || die "validate should pass (grounded candidates, bodies filled, no gate violations)"
 pass "validate exit 0"
 
 # ==================================================================================
@@ -122,7 +156,18 @@ lifecycle: canonical
 resolution: open
 verification: $4
 ---
-body
+
+## Conclusion, with its conditions
+
+The effect holds under the stated fork.
+
+## The contradiction and the caveat
+
+The sibling reverses the sign under the same estimand; this is why it matters.
+
+## What would change it
+
+A pre-registered replication would shrink the residual.
 EOF
 }
 mkclaim "$VHOST" clm-eeee00000001 experimental verified
@@ -196,6 +241,10 @@ KS="$(mktemp -d "${TMPDIR:-/tmp}/cairn-keystone-XXXXXX")"
   bun run "$CLI" add-claim --text "T does not raise O." --evidence file:e.csv --estimand "$KEST" \
     --provenance ai_proposed --contradicts "$POS" >/dev/null
   NEG="$(ls cairn/claims | grep -v "$POS" | sed -n '1p' | sed 's/\.md$//')"
+  # Both are candidates; fill their bodies (NEG declares a contradicts edge, so its contradiction
+  # movement must be filled too) before the canonical boundary — ADR-0007 body-movements gate.
+  fillbody "cairn/claims/$POS.md"
+  fillbody "cairn/claims/$NEG.md"
   bun run "$CLI" publish >/dev/null || { echo "KEYSTONE publish failed"; exit 1; }
   echo "$POS $NEG $KEST"
 ) > "$KS/keystone.out" 2>/dev/null || die "keystone setup failed"
@@ -221,6 +270,36 @@ CANON_LINE="$(grep -n 'Canonical claims' "$INDEX" | head -1 | cut -d: -f1)"
 grep -q "$KNEG" "$INDEX" || die "index.md must name the contesting claim"
 rm -rf "$KS"
 pass "NK CLOSED-NEGATIVE reproduced: both canonical, contested blocked from settled, contradiction surfaced"
+
+# ==================================================================================
+echo "[10] body-movements gate (ADR-0007): an unfilled-skeleton candidate fails validate+publish; filling unblocks"
+BHOST="$(mktemp -d "${TMPDIR:-/tmp}/cairn-body-XXXXXX")"
+( cd "$BHOST"
+  printf 'x\n1\n' > e.csv
+  BEST="$(bun run "$CLI" add-estimand --def "Does T raise O (body gate)?" | sed -n 's/^\(est-[0-9a-f]*\)$/\1/p' | head -1)"
+  # Grounded + estimand'd ⇒ a candidate; leave the add-claim skeleton body UNFILLED.
+  bun run "$CLI" add-claim --text "T raises O." --evidence file:e.csv --estimand "$BEST" --provenance ai_proposed >/dev/null
+  BID="$(ls cairn/claims | sed -n '1p' | sed 's/\.md$//')"
+  echo "$BID"
+) > "$BHOST/body.out" 2>/dev/null || die "body-gate setup failed"
+BID="$(cat "$BHOST/body.out")"
+[ -n "$BID" ] || die "could not resolve body-gate claim id"
+# validate FAILS (exit 3), naming the body-movements gate and the offending claim.
+BVOUT="$( ( cd "$BHOST" && bun run "$CLI" validate ) 2>&1 )"; BVCODE=$?
+[ "$BVCODE" = "3" ] || die "unfilled-skeleton candidate must FAIL validate (exit 3), got $BVCODE"
+grep -q "body-movements" <<<"$BVOUT" || die "failure must name the body-movements gate"
+grep -q "$BID" <<<"$BVOUT" || die "failure must name the unfilled claim $BID"
+# publish validates first ⇒ also refused; nothing frozen, claim stays draft.
+( cd "$BHOST" && bun run "$CLI" publish ) >/dev/null 2>&1 && die "publish must REFUSE an unfilled-skeleton candidate (exit 3)"
+[ ! -d "$BHOST/cairn/snapshots" ] || [ -z "$(ls -A "$BHOST/cairn/snapshots" 2>/dev/null)" ] || die "publish must freeze NOTHING when the body gate fails"
+[ "$(fmval2 "$BHOST" "$BID" lifecycle)" = "draft" ] || die "the blocked claim must stay a draft"
+# Filling the three movements unblocks BOTH validate and publish; the claim promotes to canonical.
+fillbody "$BHOST/cairn/claims/$BID.md"
+( cd "$BHOST" && bun run "$CLI" validate ) >/dev/null 2>&1 || die "filled body must PASS validate"
+( cd "$BHOST" && bun run "$CLI" publish ) >/dev/null 2>&1 || die "filled body must PASS publish"
+[ "$(fmval2 "$BHOST" "$BID" lifecycle)" = "canonical" ] || die "filled candidate must promote to canonical"
+rm -rf "$BHOST"
+pass "unfilled-skeleton candidate blocked (validate+publish, nothing frozen); filling the 3 movements promotes it"
 
 # ==================================================================================
 echo

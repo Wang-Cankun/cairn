@@ -65,6 +65,52 @@ function claimIds(h: string): string[] {
 function readClaimFile(h: string, id: string): string {
   return readFileSync(join(h, "cairn", "claims", `${id}.md`), "utf8");
 }
+/**
+ * Fill a claim body so it clears the body-movements gate (ADR-0007). There is no body-fill CLI verb
+ * (add-claim only writes the skeleton), so we overwrite the body on disk — the same writeFileSync
+ * idiom the tamper tests use — replacing every `<...>` skeleton cue with real prose for all three
+ * movements. A fully-filled body has no cue left, so it passes regardless of the claim's edges.
+ */
+function fillBody(h: string, id: string): void {
+  const file = readClaimFile(h, id);
+  const fmEnd = file.indexOf("\n---", 3); // end of the closing frontmatter fence
+  const head = file.slice(0, fmEnd + 4); // include the closing `---`
+  const filled = [
+    "",
+    "",
+    "## Conclusion, with its conditions",
+    "",
+    "The effect holds, conditional on the cohort-Z fork; under the alternate fork it attenuates.",
+    "",
+    "## The contradiction and the caveat",
+    "",
+    "The contesting sibling matters because it reverses the sign under the same estimand; the inherited caveat about depth confounding bounds the residual.",
+    "",
+    "## What would change it",
+    "",
+    "A pre-registered replication on an independent cohort would shrink the residual uncertainty.",
+    "",
+  ].join("\n");
+  writeFileSync(join(h, "cairn", "claims", `${id}.md`), head + filled);
+}
+/**
+ * Body lines that DELIVER all three movements (every required section header present, no skeleton cue),
+ * so a hand-built canonical fixture clears the body-movements gate (ADR-0007) and only the gate UNDER
+ * TEST fires. Spread these where a hand-built claim file would otherwise end with a bare `body` line.
+ */
+const MOVEMENTS_BODY: string[] = [
+  "## Conclusion, with its conditions",
+  "",
+  "The effect holds under the stated fork.",
+  "",
+  "## The contradiction and the caveat",
+  "",
+  "The sibling reverses the sign under the same estimand; this is why it matters.",
+  "",
+  "## What would change it",
+  "",
+  "A pre-registered replication would shrink the residual.",
+];
 /** Extract a top-level scalar from the YAML frontmatter of a serialized claim file. */
 function fmScalar(file: string, key: string): string | undefined {
   const fmBlock = file.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -214,7 +260,9 @@ describe("v2 CLI seam — authoring & locked fields", () => {
     expect(fmScalar(file, "verification")).toBe("unverified");
     // ...corroboration is derived (no reviewers) to self-asserted...
     expect(fmScalar(file, "corroboration")).toBe("self-asserted");
-    // ...and validate confirms no trust-field-lock violation slipped through.
+    // ...and validate confirms no trust-field-lock violation slipped through (body filled so the
+    // body-movements gate (ADR-0007) does not block this candidate).
+    fillBody(h, id);
     const v = run(h, ["validate"]);
     expect(v.code).toBe(0);
   });
@@ -253,7 +301,7 @@ describe("v2 CLI seam — gates via validate", () => {
         "resolution: open",
         "verification: unverified",
         "---",
-        "body",
+        ...MOVEMENTS_BODY,
         "",
       ].join("\n"),
     );
@@ -300,7 +348,7 @@ describe("v2 CLI seam — gates via validate", () => {
         "resolution: open",
         `verification: ${verification}`,
         "---",
-        "body",
+        ...MOVEMENTS_BODY,
         "",
       ].join("\n");
 
@@ -340,11 +388,13 @@ describe("v2 CLI seam — gates via validate", () => {
     const est = run(h, ["add-estimand", "--def", "The question this claim answers."]).stdout.match(EST)![0];
     run(h, ["add-claim", "--text", "Now with an estimand.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
     const id2 = claimIds(h).find((i) => i !== id)!;
+    fillBody(h, id2); // id2 is a candidate too — fill its body so body-movements (ADR-0007) does not also flag it
     const pub2 = run(h, ["publish"]);
     // still fails because the FIRST estimand-less draft is grounded ⇒ still a candidate that blocks.
     expect(pub2.code).toBe(3);
     expect(pub2.stderr).toContain(id); // the estimand-less one is the offender
     expect(pub2.stderr).not.toContain(`estimand-required] ${id2}`); // the estimand'd one is clean
+    expect(pub2.stderr).not.toContain(`body-movements] ${id2}`); // and its body is filled, so it is clean here too
   });
 
   test("human_reviewed is no longer a valid provenance (a human reviewing is consensus, not territory)", () => {
@@ -393,7 +443,7 @@ describe("v2 CLI seam — gates via validate", () => {
         "resolution: open",
         `verification: ${verification}`,
         "---",
-        "body",
+        ...MOVEMENTS_BODY,
         "",
       ].join("\n");
 
@@ -456,7 +506,7 @@ describe("v2 CLI seam — gates via validate", () => {
         "resolution: open",
         "verification: verified",
         "---",
-        "body",
+        ...MOVEMENTS_BODY,
         "",
       ].join("\n"),
     );
@@ -501,7 +551,7 @@ describe("v2 CLI seam — gates via validate", () => {
         `resolution: ${resolution}`,
         "verification: unverified",
         "---",
-        "body",
+        ...MOVEMENTS_BODY,
         "",
       ].join("\n");
 
@@ -619,6 +669,8 @@ describe("v2 CLI seam — orient surface & publish bundle", () => {
       "--contradicts",
       A,
     ]);
+    // Both are candidates; fill their bodies so the body-movements gate (ADR-0007) does not block publish.
+    for (const id of claimIds(h)) fillBody(h, id);
     run(h, ["publish"]); // promote both to canonical
 
     const head = run(h, ["head"]);
@@ -642,6 +694,9 @@ describe("v2 CLI seam — orient surface & publish bundle", () => {
     run(h, ["add-claim", "--text", "Grounded canonical-to-be.", "--evidence", "file:e.csv", "--estimand", estPub, "--provenance", "ai_proposed"]);
     run(h, ["add-claim", "--text", "Ungrounded draft, stays draft.", "--provenance", "ai_proposed"]);
 
+    // Fill the candidate's body so the body-movements gate (ADR-0007) does not block promotion. The
+    // ungrounded draft is not a candidate, so its skeleton body is harmless either way.
+    for (const id of claimIds(h)) fillBody(h, id);
     const pub = run(h, ["publish"]);
     expect(pub.code).toBe(0);
     expect(pub.stdout).toContain("published snapshot");
@@ -682,6 +737,9 @@ describe("v2 CLI seam — orient surface & publish bundle", () => {
     writeFileSync(join(h, "e.csv"), "a\n1\n", "utf8");
     const estRepro = run(h, ["add-estimand", "--def", "Repro estimand."]).stdout.match(EST)![0];
     run(h, ["add-claim", "--text", "Repro.", "--evidence", "file:e.csv", "--estimand", estRepro, "--provenance", "ai_proposed"]);
+    // Fill the body ONCE before the first publish so all three publishes see the same (filled) view —
+    // body-movements (ADR-0007) must pass and the snapshot id must stay reproducible.
+    fillBody(h, claimIds(h)[0]!);
     const p1 = run(h, ["publish"]);
     const id1 = p1.stdout.match(/published snapshot ([0-9a-f]+)/)![1]!;
     const oldBytes = readFileSync(join(h, "cairn", "snapshots", id1, "head.json"));
@@ -732,6 +790,8 @@ describe("v2 CLI seam — estimand collapse refusal", () => {
       "--contradicts",
       A,
     ]);
+    // Both are candidates; fill their bodies so body-movements (ADR-0007) does not block promotion.
+    for (const id of claimIds(h)) fillBody(h, id);
     const pub = run(h, ["publish"]);
     expect(pub.code).toBe(0);
     // Both reach canonical (collapse refusal blocks GROUPING, never authoring/promotion).
@@ -772,6 +832,11 @@ describe("v2 CLI seam — KEYSTONE: NK CLOSED-NEGATIVE", () => {
       POS,
     ]);
     const NEG = claimIds(h).find((i) => i !== POS)!;
+
+    // Both are candidates; fill their bodies so body-movements (ADR-0007) does not block promotion.
+    // (NEG declares a contradicts edge, so its contradiction movement must be filled too — fillBody does.)
+    fillBody(h, POS);
+    fillBody(h, NEG);
 
     // Publish: BOTH reach canonical (neither side dropped; the multiverse is persisted).
     const pub = run(h, ["publish"]);
@@ -856,6 +921,7 @@ describe("v2 CLI seam — publish freezes a SELF-CONSISTENT snapshot (no false f
     const est = run(h, ["add-estimand", "--def", "Does T raise O?"]).stdout.match(EST)![0];
     run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:scores.csv", "--estimand", est, "--provenance", "ai_proposed"]);
     const id = claimIds(h)[0]!;
+    fillBody(h, id); // body-movements (ADR-0007): fill before promotion
 
     // First publish promotes the grounded draft to canonical (file stamped freshness: fresh).
     expect(run(h, ["publish"]).code).toBe(0);
@@ -908,6 +974,8 @@ describe("v2 CLI seam — referential integrity (a canonical claim's cited nodes
     run(h, ["add-claim", "--text", "Cites a real estimand.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
     // The ghost-citing claim still blocks; retract it by removing its file, then publish succeeds.
     rmSync(join(h, "cairn", "claims", claimIds(h).find((c) => readClaimFile(h, c).includes("est-deadbeef0001"))!) + ".md");
+    // The surviving real-estimand claim is a candidate; fill its body for body-movements (ADR-0007).
+    for (const c of claimIds(h)) fillBody(h, c);
     expect(run(h, ["publish"]).code).toBe(0);
   });
 
@@ -928,6 +996,115 @@ describe("v2 CLI seam — referential integrity (a canonical claim's cited nodes
     rmSync(join(h, "cairn", "claims", `${ghostId}.md`));
     const cfd = run(h, ["add-confound", "--caveat", "A real, authored caveat."]).stdout.match(CFD)![0];
     run(h, ["add-claim", "--text", "Inherits a real confound.", "--evidence", "file:e.csv", "--estimand", est, "--inherits-caveat", cfd, "--provenance", "ai_proposed"]);
+    // This candidate inherits a caveat edge, so its contradiction movement cue must also be filled
+    // (body-movements, ADR-0007); fillBody clears all three movements.
+    for (const c of claimIds(h)) fillBody(h, c);
     expect(run(h, ["publish"]).code).toBe(0);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — body-movements gate (the body's narrative movements must be present, ADR-0007)", () => {
+  // add-claim writes a SKELETON body full of `<...>` cues. A grounded+estimand'd claim is a
+  // candidate-canonical, so the unfilled skeleton must block BOTH validate and publish — and a draft
+  // (non-candidate) must NOT be blocked. The gate is pure literal-cue presence + edge count (ADR-0004).
+
+  test("(a) an unfilled-skeleton candidate FAILS validate (exit 3, body-movements + the claim) AND publish freezes nothing", () => {
+    const h = host("body-unfilled");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const est = run(h, ["add-estimand", "--def", "Does T raise O?"]).stdout.match(EST)![0];
+    // Grounded + estimand'd ⇒ a candidate; body left as the unfilled skeleton (conclusion cue present).
+    run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("body-movements");
+    expect(v.stderr).toContain(id);
+
+    // publish validates first ⇒ also refused; nothing is frozen and the claim stays a draft.
+    const p = run(h, ["publish"]);
+    expect(p.code).toBe(3);
+    expect(p.stderr).toContain(id);
+    expect(latestSnapshotId(h)).toBeNull(); // never reached the freeze
+    expect(fmScalar(readClaimFile(h, id), "lifecycle")).toBe("draft");
+
+    // Filling the body unblocks both: validate passes, publish promotes it to canonical.
+    fillBody(h, id);
+    expect(run(h, ["validate"]).code).toBe(0);
+    expect(run(h, ["publish"]).code).toBe(0);
+    expect(fmScalar(readClaimFile(h, id), "lifecycle")).toBe("canonical");
+  });
+
+  test("(c) a candidate WITH a contradicts edge but an unfilled contradiction movement FAILS validate", () => {
+    const h = host("body-contra");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const est = run(h, ["add-estimand", "--def", "Does T raise O?"]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const pos = claimIds(h)[0]!;
+    run(h, ["add-claim", "--text", "T does not raise O.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed", "--contradicts", pos]);
+    const neg = claimIds(h).find((i) => i !== pos)!;
+
+    // Fill POS fully, but leave NEG's skeleton (it declares a contradicts edge ⇒ contradiction cue present).
+    fillBody(h, pos);
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("body-movements");
+    expect(v.stderr).toContain(neg); // the unfilled contesting claim is the offender
+    // POS is filled ⇒ it is NOT named by a body-movements violation.
+    expect(v.stderr).not.toContain(`body-movements] ${pos}`);
+
+    // Fill NEG too ⇒ both clear; publish promotes both.
+    fillBody(h, neg);
+    expect(run(h, ["validate"]).code).toBe(0);
+    expect(run(h, ["publish"]).code).toBe(0);
+  });
+
+  test("(e) a DRAFT (ungrounded, non-candidate) with the unfilled skeleton does NOT fail validate", () => {
+    const h = host("body-draft");
+    // Ungrounded draft: not a candidate ⇒ the body-movements gate never runs over it (soft authoring).
+    run(h, ["add-claim", "--text", "A loose hunch, body unfilled.", "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+    // Sanity: its body still carries the conclusion cue (unfilled skeleton).
+    expect(readClaimFile(h, id)).toContain("<state the claim and the fork(s)");
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(0);
+    expect(v.stdout).toContain("OK");
+  });
+
+  test("(f) an EMPTY body (skeleton headers DELETED, no cue left) is still REFUSED at validate AND publish", () => {
+    // The empty-body escape (ADR-0007 §Consequences: the body can no longer be empty at canonical). An
+    // agent who deletes the skeleton headers rather than leaving the <...> cues has a body with NO cue —
+    // a cue-absence-only gate would promote a blank narrative, permanently losing the reasoning. The
+    // section-header requirement refuses it at BOTH CLI surfaces.
+    const h = host("body-empty");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const est = run(h, ["add-estimand", "--def", "Does T raise O?"]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+
+    // Overwrite the body to EMPTY, preserving the frontmatter through the closing fence.
+    const file = readClaimFile(h, id);
+    const fmEnd = file.indexOf("\n---", 3);
+    writeFileSync(join(h, "cairn", "claims", `${id}.md`), file.slice(0, fmEnd + 4) + "\n");
+    // No skeleton cue remains, but no movement is delivered either.
+    expect(readClaimFile(h, id)).not.toContain("<state the claim and the fork(s)");
+
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("body-movements");
+    expect(v.stderr).toContain(id);
+
+    const p = run(h, ["publish"]);
+    expect(p.code).toBe(3);
+    expect(p.stderr).toContain(id);
+    expect(latestSnapshotId(h)).toBeNull(); // nothing frozen
+    expect(fmScalar(readClaimFile(h, id), "lifecycle")).toBe("draft"); // stays a draft
+
+    // Filling the three movements (headers + prose) unblocks both surfaces.
+    fillBody(h, id);
+    expect(run(h, ["validate"]).code).toBe(0);
+    expect(run(h, ["publish"]).code).toBe(0);
+    expect(fmScalar(readClaimFile(h, id), "lifecycle")).toBe("canonical");
   });
 });
