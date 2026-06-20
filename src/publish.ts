@@ -32,11 +32,12 @@ import {
   toPublishedClaim,
 } from "./snapshot.ts";
 import { renderIndexMd } from "./render.ts";
-import { appendLog, isoNow, readAllClaims, readConfig, writeClaim } from "./store.ts";
+import { appendLog, isoNow, nodeExists, readAllClaims, readConfig, writeClaim } from "./store.ts";
 import { isGrounded } from "./claimfile.ts";
 import type {
   ClaimFile,
   GateResult,
+  GateViolation,
   PublishedClaim,
   SnapshotDiff,
   StorePaths,
@@ -115,6 +116,46 @@ function relock(
 }
 
 /**
+ * Referential-integrity violations: every CANDIDATE-canonical claim's cited estimand (if declared) and
+ * each inherited confound MUST EXIST as a node on disk. This is the existence companion to the pure
+ * estimand-required PRESENCE gate (gate c.1b): presence says "the field is set", existence says "the
+ * node it points at is really there", so a canonical claim never ships referencing a question/caveat
+ * absent from the bundle (and freezeBundle never silently skips a missing referenced node). It compares
+ * ids and tests file existence ONLY — it never reads a node body — so the ADR-0004/0005 ceiling (the
+ * CLI judges ids, never meaning) holds. It lives here, NOT in the pure (filesystem-free) gate.ts,
+ * because verifying existence necessarily touches the store.
+ */
+export function referentialIntegrityViolations(
+  paths: StorePaths,
+  claims: ClaimFile[],
+): GateViolation[] {
+  const { candidates } = candidateSet(claims);
+  const out: GateViolation[] = [];
+  for (const c of candidates) {
+    const fm = c.frontmatter;
+    if (fm.estimand !== undefined && !nodeExists(paths, fm.estimand)) {
+      out.push({
+        gate: "referential-integrity",
+        claim: fm.id,
+        detail: fm.estimand,
+        message: `claim ${fm.id} cites estimand ${fm.estimand} but no estimands/${fm.estimand}.md exists (a canonical claim's question node must exist)`,
+      });
+    }
+    for (const cfd of fm.inherits_caveat) {
+      if (!nodeExists(paths, cfd)) {
+        out.push({
+          gate: "referential-integrity",
+          claim: fm.id,
+          detail: cfd,
+          message: `claim ${fm.id} inherits caveat ${cfd} but no confounds/${cfd}.md exists (an inherited confound node must exist)`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Run the data side of publish against an already-resolved store. Returns a PublishResult; throws
  * PublishError (naming the failing gate + claim) if validate fails.
  */
@@ -125,11 +166,16 @@ export function publish(paths: StorePaths, opts: { now?: Date } = {}): PublishRe
 
   let claims = readAllClaims(paths);
 
-  // 1. validate — all promotion gates.
+  // 1. validate — all promotion gates (pure mechanism) PLUS referential integrity (cited estimand /
+  // inherited confound nodes must exist on disk; the one check that must touch the store).
   const gate: GateResult = runGate(claims);
-  if (!gate.ok) {
-    const lines = gate.violations.map((v) => `${v.gate}/${v.claim}: ${v.message}`);
-    throw new PublishError(`validate failed (${gate.violations.length} violation(s)):\n  ${lines.join("\n  ")}`);
+  const violations: GateViolation[] = [
+    ...gate.violations,
+    ...referentialIntegrityViolations(paths, claims),
+  ];
+  if (violations.length > 0) {
+    const lines = violations.map((v) => `${v.gate}/${v.claim}: ${v.message}`);
+    throw new PublishError(`validate failed (${violations.length} violation(s)):\n  ${lines.join("\n  ")}`);
   }
 
   // 2. Promote passing grounded drafts to canonical (rewrite files), RE-LOCKING every CLI-computed
@@ -157,8 +203,29 @@ export function publish(paths: StorePaths, opts: { now?: Date } = {}): PublishRe
   if (promoted.length > 0) claims = readAllClaims(paths);
 
   // 3. Published head: canonical only, freshness frozen at publish (as_of = published_at).
-  const canonical = canonicalFrontmatter(claims);
   const freshness = computeFreshness(claims, paths.hostRoot, published_at, config.remote_host);
+
+  // 3b. RE-LOCK every canonical claim's LIVE file to the just-computed freshness + reach_ground BEFORE
+  // freezing, so the byte-for-byte frozen copy (freezeBundle) can never disagree with head.json / the
+  // snapshot id. A publish AFTER an artifact change but WITHOUT a prior `refresh` would otherwise freeze
+  // a claim file still stamped `fresh` while head.json (computed live) says `stale` — the exact
+  // false-fresh enemy Cairn exists to kill, frozen into an immutable bundle. Recompute-only write
+  // (asserter unchanged, body preserved): freshness is recomputed from the STORED fingerprints, never
+  // re-baselined (re-baselining would launder a moved artifact into a false `fresh`), and the pure trust
+  // fields are re-derived (already gate-validated equal). Only files that actually drift are rewritten,
+  // so an already-consistent store (e.g. a refresh-then-publish) sees no churn.
+  let relocked = false;
+  for (const c of claims) {
+    const fm = c.frontmatter;
+    if (fm.lifecycle !== "canonical") continue;
+    const fr = freshness.get(fm.id) ?? "unknown";
+    if (fm.freshness === fr && fm.reach_ground === isGrounded(fm)) continue;
+    writeClaim(paths, relock(fm, promoteLiveIds, freshness), c.body);
+    relocked = true;
+  }
+  if (relocked) claims = readAllClaims(paths);
+
+  const canonical = canonicalFrontmatter(claims);
   const publishedClaims: PublishedClaim[] = canonical.map((fm) =>
     toPublishedClaim(fm, freshness.get(fm.id) ?? "unknown"),
   );

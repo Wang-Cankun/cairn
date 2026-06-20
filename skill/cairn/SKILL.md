@@ -75,8 +75,9 @@ evidence, the fork it depends on, and any claim it contradicts.
 
 ### 3. REFRESH — after any rerun
 `cairn refresh` after `tar_make()`, a re-run pipeline, regenerated outputs, or a re-fit model. It
-re-fingerprints reachable artifacts, cascades staleness through dependency edges, and re-reads `dvc:`
-md5s; an unreachable remote reads `unknown`.
+re-fingerprints reachable artifacts and re-reads `dvc:` md5s, then re-locks each claim's freshness from
+its own evidence refs — a claim grounds only through its own evidence, the v2 schema has **no
+claim→claim dependency edge**, so there is no cascade to walk; an unreachable remote reads `unknown`.
 **Done when:** you have named the newly-stale claims to the user so they can re-verify or re-author.
 
 ### 4. PUBLISH — before sharing

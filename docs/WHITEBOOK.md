@@ -506,7 +506,7 @@ OKF 能存 claim；DVC 能管字节和版本；nanopublication 和 SEPIO（见 I
 
 **四个触点（每个 session 的循环）：**
 
-1. **Orient（session 开始）**：跑 `cairn head`，先读 canonical 状态 + pending drafts 再动手。fresh session 一落地即定向，不重新推导，不重犯一个被遗忘的错误。
+1. **Orient（session 开始）**：跑 `cairn head`，先读 canonical 状态再动手（draft **可见但无权威**——不上 canonical orient 面，要查走 `cairn drafts` / `status`）。fresh session 一落地即定向，不重新推导，不重犯一个被遗忘的错误。
 2. **Author（得出结论时）**：`cairn add-claim --text … --estimand … --evidence kind:ref …`，一次便宜的、在流程中的调用。draft-soft，没有「摩擦税」逼你逃避记录；低摩擦是主要的抗遗忘机制。
 3. **Refresh（一次 rerun / 重算之后）**：`cairn refresh`，重算 freshness，浮出新变 stale 的 claim。
 4. **Publish（分享前）**：`cairn validate`（reach-ground 闸）→ `cairn publish`（冻 snapshot + diff）。

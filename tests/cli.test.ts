@@ -91,6 +91,33 @@ function snapshotHead(h: string, id: string): {
 } {
   return JSON.parse(readFileSync(join(h, "cairn", "snapshots", id, "head.json"), "utf8"));
 }
+/**
+ * Author an estimand NODE directly into the store (black-box: mirrors the CLI's serialized estimand
+ * format), so a hand-written canonical claim that cites a FIXED estimand id satisfies referential
+ * integrity. Tests that exercise OTHER gates use a placeholder estimand id as scaffolding; the
+ * referenced node must still exist (a canonical claim may not cite a question node that isn't there).
+ */
+function putEstimand(h: string, id: string): void {
+  const dir = join(h, "cairn", "estimands");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${id}.md`),
+    [
+      "---",
+      "type: estimand",
+      `id: ${id}`,
+      "asserter:",
+      "  who: a",
+      "  model: m",
+      "  session: s",
+      "  time: 2026-06-10T20:00:00-04:00",
+      "---",
+      "The question these claims answer.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+}
 
 // id-shape regexes
 const CLM = /clm-[0-9a-f]+/;
@@ -180,6 +207,7 @@ describe("v2 CLI seam — authoring & locked fields", () => {
       "true",
     ]);
     expect(add.code).toBe(0);
+    putEstimand(h, "est-aaaa00000001"); // the cited estimand node must exist (referential integrity)
     const id = claimIds(h)[0]!;
     const file = readClaimFile(h, id);
     // verification is locked to unverified (ai_proposed can never be verified)...
@@ -241,6 +269,7 @@ describe("v2 CLI seam — gates via validate", () => {
     const claims = join(h, "cairn", "claims");
     mkdirSync(claims, { recursive: true });
     writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    putEstimand(h, "est-aaaa00000001"); // the cited estimand node must exist (referential integrity)
     const mk = (id: string, provenance: string, verification: string) =>
       [
         "---",
@@ -333,6 +362,7 @@ describe("v2 CLI seam — gates via validate", () => {
     const claims = join(h, "cairn", "claims");
     mkdirSync(claims, { recursive: true });
     writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    putEstimand(h, "est-aaaa00000001"); // the cited estimand node must exist (referential integrity)
     const mk = (id: string, provenance: string, verification: string) =>
       [
         "---",
@@ -440,6 +470,7 @@ describe("v2 CLI seam — gates via validate", () => {
     const claims = join(h, "cairn", "claims");
     mkdirSync(claims, { recursive: true });
     writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    putEstimand(h, "est-aaaa00000001"); // the cited estimand node must exist (referential integrity)
     const mk = (id: string, contradicts: string, resolution: string) =>
       [
         "---",
@@ -810,5 +841,93 @@ describe("v2 CLI seam — misc contract", () => {
     expect(file).toContain("type: confound");
     expect(file).toContain("unerasable: true");
     expect(file).toContain("depth ≡ group ≡ library.");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — publish freezes a SELF-CONSISTENT snapshot (no false fresh)", () => {
+  // The enemy is a false `fresh`. publish computes freshness live for head.json + the snapshot id, but
+  // froze the claim FILES byte-for-byte from the live store — so a publish AFTER an artifact change but
+  // WITHOUT a refresh could freeze a bundle whose head.json says `stale` while the claim file inside the
+  // SAME snapshot still says `fresh`. A reader opening the frozen claim file sees the false fresh.
+  test("publish without a prior refresh re-locks freshness so head.json and the frozen claim file agree", () => {
+    const h = host("falsefresh");
+    writeFileSync(join(h, "scores.csv"), "a,b\n1,2\n", "utf8");
+    const est = run(h, ["add-estimand", "--def", "Does T raise O?"]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "T raises O.", "--evidence", "file:scores.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    const id = claimIds(h)[0]!;
+
+    // First publish promotes the grounded draft to canonical (file stamped freshness: fresh).
+    expect(run(h, ["publish"]).code).toBe(0);
+    expect(fmScalar(readClaimFile(h, id), "freshness")).toBe("fresh");
+
+    // Mutate the evidence, then publish AGAIN with NO intervening refresh.
+    writeFileSync(join(h, "scores.csv"), "a,b\n1,2\nMUTATED,9\n", "utf8");
+    expect(run(h, ["publish"]).code).toBe(0);
+
+    const snapId = latestSnapshotId(h)!;
+    const headFreshness = String(snapshotHead(h, snapId).claims[0]!.freshness);
+    const frozenFreshness = fmScalar(
+      readFileSync(join(h, "cairn", "snapshots", snapId, "claims", `${id}.md`), "utf8"),
+      "freshness",
+    );
+    const liveFreshness = fmScalar(readClaimFile(h, id), "freshness");
+
+    // The mutation makes the claim genuinely stale; ALL THREE views must agree (no false fresh).
+    expect(headFreshness).toBe("stale");
+    expect(frozenFreshness).toBe("stale"); // was the bug: frozen file said "fresh"
+    expect(liveFreshness).toBe("stale"); // live store must match its own head, not lie
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════════
+describe("v2 CLI seam — referential integrity (a canonical claim's cited nodes must exist)", () => {
+  // estimand-required (gate c.1b) is a PRESENCE check (the field is set). But a set field pointing at a
+  // node that does not exist still ships a canonical claim referencing a question/caveat that isn't in
+  // the bundle. Referential integrity (fs-touching, not the pure gate) closes that: a candidate's cited
+  // estimand and inherited confounds must EXIST as nodes. This compares ids only — it never reads the
+  // node body — so the ADR-0004/0005 ceiling (the CLI judges ids, never meaning) is preserved.
+  test("a candidate citing a non-existent ESTIMAND node fails validate AND publish (exit 3), nothing frozen", () => {
+    const h = host("dangling-est");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    // Grounded ⇒ a candidate; cites a well-shaped est- id whose node file was never authored.
+    run(h, ["add-claim", "--text", "Cites a ghost estimand.", "--evidence", "file:e.csv", "--estimand", "est-deadbeef0001", "--provenance", "ai_proposed"]);
+
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("referential-integrity");
+    expect(v.stderr).toContain("est-deadbeef0001");
+
+    const p = run(h, ["publish"]);
+    expect(p.code).toBe(3);
+    expect(p.stderr).toContain("est-deadbeef0001");
+    expect(latestSnapshotId(h)).toBeNull(); // never reached the freeze
+
+    // Authoring the missing estimand node unblocks both.
+    const est = run(h, ["add-estimand", "--def", "The now-real question."]).stdout.match(EST)![0];
+    run(h, ["add-claim", "--text", "Cites a real estimand.", "--evidence", "file:e.csv", "--estimand", est, "--provenance", "ai_proposed"]);
+    // The ghost-citing claim still blocks; retract it by removing its file, then publish succeeds.
+    rmSync(join(h, "cairn", "claims", claimIds(h).find((c) => readClaimFile(h, c).includes("est-deadbeef0001"))!) + ".md");
+    expect(run(h, ["publish"]).code).toBe(0);
+  });
+
+  test("a candidate inheriting a non-existent CONFOUND node fails validate; a real confound publishes clean", () => {
+    const h = host("dangling-cfd");
+    writeFileSync(join(h, "e.csv"), "x\n1\n", "utf8");
+    const est = run(h, ["add-estimand", "--def", "A real question for the confound test."]).stdout.match(EST)![0];
+
+    // Inherits a well-shaped cfd- id whose node file was never authored ⇒ blocked.
+    run(h, ["add-claim", "--text", "Inherits a ghost confound.", "--evidence", "file:e.csv", "--estimand", est, "--inherits-caveat", "cfd-deadbeef0002", "--provenance", "ai_proposed"]);
+    const ghostId = claimIds(h)[0]!;
+    const v = run(h, ["validate"]);
+    expect(v.code).toBe(3);
+    expect(v.stderr).toContain("referential-integrity");
+    expect(v.stderr).toContain("cfd-deadbeef0002");
+
+    // Retract the ghost-citing claim; a real authored confound node clears the integrity check.
+    rmSync(join(h, "cairn", "claims", `${ghostId}.md`));
+    const cfd = run(h, ["add-confound", "--caveat", "A real, authored caveat."]).stdout.match(CFD)![0];
+    run(h, ["add-claim", "--text", "Inherits a real confound.", "--evidence", "file:e.csv", "--estimand", est, "--inherits-caveat", cfd, "--provenance", "ai_proposed"]);
+    expect(run(h, ["publish"]).code).toBe(0);
   });
 });

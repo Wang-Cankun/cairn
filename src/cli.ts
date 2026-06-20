@@ -23,7 +23,7 @@ import { stampFingerprints } from "./fingerprint.ts";
 import { isGrounded } from "./claimfile.ts";
 import { buildOrientSurface, canonicalFrontmatter, toPublishedClaim } from "./snapshot.ts";
 import { renderIndexMd } from "./render.ts";
-import { publish, PublishError } from "./publish.ts";
+import { publish, PublishError, referentialIntegrityViolations } from "./publish.ts";
 import { reconcile } from "./reconcile.ts";
 import {
   appendLog,
@@ -453,12 +453,18 @@ function cmdRefresh(paths: StorePaths, parsed: Parsed): void {
 function cmdValidate(paths: StorePaths): void {
   const claims = readAllClaims(paths);
   const gate = runGate(claims);
-  if (gate.ok) {
-    console.log(`validate: OK — ${gate.candidateIds.length} grounded draft(s) would promote, no violations`);
+  // Combine the pure gate suite with referential integrity (cited estimand / inherited confound nodes
+  // must exist) so `cairn validate` is the same precondition publish enforces — not a weaker one.
+  const violations = [...gate.violations, ...referentialIntegrityViolations(paths, claims)];
+  if (violations.length === 0) {
+    console.log(
+      `validate: OK — ${gate.candidateIds.length} grounded draft(s) would promote, no violations ` +
+        `(gates + referential integrity)`,
+    );
     process.exit(0);
   }
-  console.error(`validate: FAILED — ${gate.violations.length} gate violation(s):`);
-  for (const v of gate.violations) console.error(`  [${v.gate}] ${v.claim}: ${v.message}`);
+  console.error(`validate: FAILED — ${violations.length} gate violation(s):`);
+  for (const v of violations) console.error(`  [${v.gate}] ${v.claim}: ${v.message}`);
   process.exit(3);
 }
 
